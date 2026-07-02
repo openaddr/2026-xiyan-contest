@@ -599,6 +599,63 @@ def test_p0_audit():
     return ok
 
 
+def test_horse_economy():
+    """平台第4局回归：骑掉唯一的马导致 T06×2 做不了（任务分 60 封顶）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def moving_state(horses, round_no=91, task_score=30, phase="NORMAL"):
+        gs = GameState(1001)
+        gs.on_start(start)   # gameplay.taskCandidates 含 T06 -> 地图会刷马匹任务
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = round_no, phase
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="MOVING", currentNodeId="S02", nextNodeId="S03",
+                         routeEdgeId="E02", currentProcess=None, buffs=[],
+                         resources=horses, freshness=95.0, taskScore=task_score)
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 只有 1 匹马 + 地图有 T06 候选 -> 不骑（留给任务）
+    a = PlannerStrategy().decide(moving_state({"SHORT_HORSE": 1}))
+    ok &= check("马匹: 唯一的马留给 T06 不骑",
+                not any(x["action"] == "USE_RESOURCE" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 有 2 匹 -> 骑掉盈余的那匹
+    a = PlannerStrategy().decide(moving_state({"SHORT_HORSE": 1, "FAST_HORSE": 1}))
+    ok &= check("马匹: 盈余马正常骑",
+                any(x["action"] == "USE_RESOURCE" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 3) 任务分 >=110（里程碑拿满）-> 不再预留
+    a = PlannerStrategy().decide(moving_state({"SHORT_HORSE": 1}, task_score=110))
+    ok &= check("马匹: 里程碑拿满后不预留",
+                any(x["action"] == "USE_RESOURCE" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 4) RUSH 阶段 -> 不预留，全力赶路
+    a = PlannerStrategy().decide(moving_state({"SHORT_HORSE": 1}, round_no=460,
+                                              phase="RUSH"))
+    ok &= check("马匹: RUSH 阶段全力赶路",
+                any(x["action"] == "USE_RESOURCE" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 5) 帧价值修正：绕路成本恒含用时分斜率
+    from lychee.planner import TaskPlanner, FRESH_VALUE_PER_FRAME, TIME_SCORE_PER_FRAME
+    gs = moving_state({"SHORT_HORSE": 1})
+    fv = TaskPlanner._frame_value(gs, eta_direct=200)
+    ok &= check("帧价值: 恒含用时斜率",
+                abs(fv - (FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME)) < 1e-9,
+                f"fv={fv:.3f}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -607,6 +664,7 @@ def main():
     ok &= test_breakthrough()
     ok &= test_edge_block()
     ok &= test_p0_audit()
+    ok &= test_horse_economy()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
