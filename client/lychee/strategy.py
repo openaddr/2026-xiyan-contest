@@ -186,6 +186,14 @@ class PlannerStrategy(BaselineStrategy):
     # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
     # （等待成本 10~30 帧 vs 冻结成本 180+ 帧），对峙上限已兜底防赖
 
+    # ---- 尾段蹲刷（V3.10）----
+    # 任务刷新跟在车队身后：领跑者吃冰，跟随者吃刷新（29/30/31 三局对手
+    # 全靠尾段刷新农到 180 任务分，我们前 200 帧后零任务）。余量充足且
+    # 里程碑未拿满时，站在任务候选点上等刷新，比冲刺快 40 帧（≈8分）值钱。
+    LOITER_MIN_SLACK = 110      # 蹲刷要求的最小交付余量（帧）
+    LOITER_BASE_CAP = 110       # 任务基础分达到该值后不再蹲（末档里程碑已到手）
+    LOITER_BUDGET = 50          # 整局蹲刷总预算（帧），有限下注
+
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
@@ -199,6 +207,7 @@ class PlannerStrategy(BaselineStrategy):
         self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
         self._opp_guards_seen = False    # 对手本局是否设过卡（陷阱风险的证据门）
+        self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
 
     # ---------- 每帧入口 ----------
 
@@ -406,6 +415,11 @@ class PlannerStrategy(BaselineStrategy):
                         return P.a_wait()  # 错峰一帧再领，资源窗口不值得打
                     return P.a_claim_resource(cur, rt)
 
+        # 尾段蹲刷（V3.10）：没有值得做的目标且余量充足时，站在任务候选点
+        # 上等刷新 —— 刷出的任务下一帧就会被 plan 接住（同点零绕路必中）
+        if plan.kind == "deliver" and self._should_loiter(state, plan, cur):
+            return P.a_wait()
+
         # 赶路：任务点 / 资源点 / 宫门 / 终点
         target = plan.position if plan.kind in ("task", "resource") \
             else (terminal if verified else gate)
@@ -490,6 +504,30 @@ class PlannerStrategy(BaselineStrategy):
                     and g.get("active", g.get("defense", 0) > 0):
                 n += 1
         return n
+
+    def _should_loiter(self, state, plan, cur):
+        """尾段蹲刷判定：预算内、余量足、里程碑未满、身处任务候选点。"""
+        if state.phase != P.PHASE_NORMAL or state.me.get("verified"):
+            return False
+        if plan.slack < self.LOITER_MIN_SLACK:
+            return False
+        if (state.me.get("taskScore", 0) or 0) >= self.LOITER_BASE_CAP:
+            return False
+        if self._loiter_spent >= self.LOITER_BUDGET:
+            return False
+        if cur in (state.gate_node, state.terminal_node):
+            return False
+        # 只蹲在会刷任务的节点上（地图配置的候选点并集；配置缺失则不蹲）
+        candidates = set()
+        for nodes in (state.task_candidates or {}).values():
+            candidates.update(nodes)
+        if cur not in candidates:
+            return False
+        self._loiter_spent += 1
+        if self.log and self._loiter_spent % 10 == 1:
+            self.log.info("loiter for task refresh @%s (%d/%d)",
+                          cur, self._loiter_spent, self.LOITER_BUDGET)
+        return True
 
     def _contested_claim_first(self, state, cur, plan):
         """任务前的稀缺资源保卫：对手赶得上在我们读条期间偷走时，先领。"""

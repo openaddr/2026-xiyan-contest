@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.9-trap-evidence)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.10-tail-farm)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.9-trap-evidence</span>
-   · 114 项自测覆盖 · 生成于 2026-07-02</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.10-tail-farm</span>
+   · 119 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -386,11 +386,12 @@
 <tr><td>3.6 bundle</td><td><b>捆绑估值：任务点及沿途可领资源计入任务净值（点上全额+2帧、沿途半权，含竞速折扣与拒止）</b></td><td>replay21/22（741:774 / 742:775）：r2 任务二选一 T01@S03(官道,捆双冰) vs T08@S04(水路,捆一马)，单任务 argmax 选了水路——官道双冰第 6 次白送，鲜度 74 vs 91 又输 30 分。真实地图验证：r2 计划翻转为 T_001@S03 (net 54)</td></tr>
 <tr><td>3.7 tempo-guard</td><td><b>固定处理站不再奇偶让行（同帧撞车打 DOCK 窗口，4 张兵争+混合出牌）；对手 ETA 计入边上剩余进度</b></td><td>replay23：S02 让行送出 5 帧先手 → demo 必赢 S03 竞速 → 冰链归属在起跑线就定了（V3.6 的捆绑计划 r43 还是 S03，r48 正确回落水路）；主动设卡因边上对手被记为 ETA=0 上线以来从未触发（r287 武关教科书时机被拒），路线检查度量不一致同修</td></tr>
 <tr><td>3.8 claim-order</td><td><b>冰保卫（对手赶得上偷就先领资源再读任务条）；突破按真实耗时选削弱/强通（弃 slack 闸门）；回头迟滞（刚离开节点作首跳 +25 帧）</b></td><td>replay25 三宗罪：S03 读任务条时冰被落后 5 帧的对手偷走（r92）；slack&lt;0 跳过削弱选强通吃 100 帧（削弱只要 32）；走廊总价近似打平使 65 帧折返在绕路公式里"免费"。本局亮点：S02 窗口首胜、两次破卡+悬赏 30 —— 机制在运转，输在细节顺序</td></tr>
-<tr><td><b>3.9 trap-evidence</b></td><td><b>陷阱等待加双闸门：证据门（对手本局设过卡才设防，事件流+节点卡自动侦测）+ 地形门（只在咽喉类节点设防）</b></td><td>replay27（681:747）：开局全面领先（S02 窗口胜+冰保卫首胜+双任务），r96 起把跑在前面的 2613（历史零设卡）当埋伏者，S03/S07/S09 三次罚站共 90 帧，官道任务被横扫 90:180——对非设卡者的过度防御比陷阱本身更贵</td></tr>
+<tr><td>3.9 trap-evidence</td><td><b>陷阱等待加双闸门：证据门（对手本局设过卡才设防，事件流+节点卡自动侦测）+ 地形门（只在咽喉类节点设防）</b></td><td>replay27（681:747）：开局全面领先（S02 窗口胜+冰保卫首胜+双任务），r96 起把跑在前面的 2613（历史零设卡）当埋伏者，S03/S07/S09 三次罚站共 90 帧，官道任务被横扫 90:180——对非设卡者的过度防御比陷阱本身更贵</td></tr>
+<tr><td><b>3.10 tail-farm</b></td><td><b>尾段蹲刷：无目标且余量&gt;110、里程碑未满时，站在任务候选点等刷新（预算 50 帧）；离路资源折扣下限 0.7→0.85</b></td><td>三局对真人（736:767 / 738:749 / 725:751）：任务全部集中在前 200 帧、尾段近 300 帧零任务——任务刷新跟在车队身后，领跑者吃冰、跟随者吃刷新；base 90→130 值 +55 分而快 40 帧只值~8 分，计分结构要求为任务留出时间</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.9-trap-evidence ·
-自测 <code>python3 selftest.py</code>（114 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.10-tail-farm ·
+自测 <code>python3 selftest.py</code>（119 项）</p>
 </div>
 
 <script>

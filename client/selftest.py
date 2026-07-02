@@ -1461,6 +1461,79 @@ def test_replay25():
     return ok
 
 
+def test_tail_farm():
+    """V3.10 回归（29/30/31：尾段任务饥荒，对手靠身后刷新农到 180）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_tail2(cur="S12", round_no=300, base=90):
+        """S12 是 T13/T14 候选点；无可做任务，对手在身后。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = round_no, "NORMAL"
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=90.0, goodFruit=95,
+                         badFruit=0, taskScore=base)
+            else:
+                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                         routeEdgeId="E05", edgeTotalMs=55200, edgeProgressMs=9000,
+                         currentProcess=None, delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 候选点 + 余量足 + 里程碑未满 → 蹲刷等待
+    a = PlannerStrategy().main_action(gs_tail2())
+    ok &= check("蹲刷: 候选点上等任务刷新",
+                a and a["action"] == "WAIT", str(a))
+
+    # 2) 任务基础分已到 110 → 不蹲，直接推进
+    a = PlannerStrategy().main_action(gs_tail2(base=110))
+    ok &= check("蹲刷: 里程碑拿满不蹲",
+                a and a["action"] == "MOVE", str(a))
+
+    # 3) 余量不足（r470）→ 不蹲
+    a = PlannerStrategy().main_action(gs_tail2(round_no=470))
+    ok &= check("蹲刷: 余量不足直奔交付",
+                a and a["action"] == "MOVE", str(a))
+
+    # 4) 预算耗尽后放行
+    st = PlannerStrategy()
+    last = None
+    for i in range(55):
+        last = st.main_action(gs_tail2(round_no=300 + i))
+    ok &= check("蹲刷: 预算耗尽后推进",
+                last and last["action"] == "MOVE", str(last))
+
+    # 5) 刷出任务立即接住：加一个 S12 的任务 → plan 变 task 且当帧领取
+    gs = gs_tail2()
+    gs.tasks = [{"taskId": "T_N", "taskTemplateId": "T13", "nodeId": "S12",
+                 "processRound": 5, "score": 15, "expireRound": 420,
+                 "active": True, "completed": False, "failed": False,
+                 "ownerPlayerId": 0, "protectionPlayerId": 0}]
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    a = st.main_action(gs, plan)
+    ok &= check("蹲刷: 刷出任务立即领取",
+                plan.kind == "task" and a and a["action"] == "CLAIM_TASK",
+                f"{plan.kind} -> {a}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1480,6 +1553,7 @@ def main():
     ok &= test_bundle()
     ok &= test_tempo_guard()
     ok &= test_replay25()
+    ok &= test_tail_farm()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
