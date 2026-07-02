@@ -465,12 +465,88 @@ def test_breakthrough():
     return ok
 
 
+def test_edge_block():
+    """平台第二败局回归：半路被设卡冻结（S09->S10 边上冻 180 帧）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def edge_state(guard_def=6, squad=6, opp_setting=False, on_edge=True):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 320
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                if on_edge:  # 挂在 E05 (S09->S10) 半路
+                    p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                             routeEdgeId="E05", currentProcess=None, buffs=[],
+                             squadAvailable=squad, resources={}, freshness=95.0,
+                             goodFruit=96, badFruit=1)
+                else:        # 停在 S09
+                    p.update(state="IDLE", currentNodeId="S09", nextNodeId=None,
+                             routeEdgeId=None, currentProcess=None, buffs=[],
+                             squadAvailable=squad, resources={}, freshness=95.0,
+                             goodFruit=96, badFruit=1)
+            else:
+                if opp_setting:
+                    p["currentProcess"] = {"action": "SET_GUARD", "type": "SET_GUARD",
+                                           "targetNodeId": "S10", "remainRound": 3}
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            if n["nodeId"] == "S10" and guard_def:
+                n["guard"] = {"ownerTeamId": "BLUE", "defense": guard_def,
+                              "maxDefense": 7, "active": True}
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 边上被冻结 -> 小分队削弱同帧出发，主车队不乱动
+    a = PlannerStrategy().decide(edge_state())
+    kinds = {x["action"]: x for x in a}
+    ok &= check("边冻结: 派小分队削弱目标卡",
+                kinds.get("SQUAD_WEAKEN", {}).get("targetNodeId") == "S10",
+                json.dumps(a, ensure_ascii=False))
+    ok &= check("边冻结: 主车队不提交无效动作",
+                not any(x["action"] in ("MOVE", "BREAK_GUARD", "FORCED_PASS")
+                        for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 边上被冻结但无人手 -> 不崩溃，不发无效动作
+    a = PlannerStrategy().decide(edge_state(squad=1))
+    ok &= check("边冻结: 无人手不发无效动作",
+                not any(x["action"] in ("SQUAD_WEAKEN", "MOVE", "BREAK_GUARD")
+                        for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 3) 停在节点、对手正读条设卡下一跳 -> 等卡成型后攻坚，不上边挨冻
+    a = PlannerStrategy().decide(edge_state(guard_def=0, opp_setting=True,
+                                            on_edge=False))
+    main_acts = [x for x in a if x["action"] in P.MAIN_ACTION_TYPES]
+    ok &= check("防冻结: 对手设卡读条中不上边",
+                len(main_acts) == 1 and main_acts[0]["action"] == "WAIT",
+                json.dumps(a, ensure_ascii=False))
+
+    # 4) 卡成型后（停在节点）恢复正常攻坚
+    a = PlannerStrategy().decide(edge_state(guard_def=6, on_edge=False))
+    ok &= check("防冻结: 卡成型后节点攻坚",
+                any(x["action"] == "BREAK_GUARD" and x["targetNodeId"] == "S10"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
     ok &= test_planner()
     ok &= test_contention()
     ok &= test_breakthrough()
+    ok &= test_edge_block()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

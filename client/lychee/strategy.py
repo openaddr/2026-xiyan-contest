@@ -201,8 +201,10 @@ class PlannerStrategy(BaselineStrategy):
 
         # 服务端行为：移动中提交只含小分队/窗口动作的包会暂停本帧推进
         # （镜像调测第 2 帧实测），补显式 MOVE 当前目标保持前进。
+        # 例外：目标节点被敌卡冻结时进度本来就不走，MOVE 只会被拒，不补。
         me = state.me
         if (actions and me.get("state") == P.ST_MOVING and me.get("nextNodeId")
+                and not state.enemy_guard(me["nextNodeId"])
                 and not any(a["action"] in P.MAIN_ACTION_TYPES for a in actions)):
             actions.append(P.a_move(me["nextNodeId"]))
         return actions
@@ -241,6 +243,14 @@ class PlannerStrategy(BaselineStrategy):
         if me.get("state") in P.BUSY_STATES:
             return None
         if me.get("routeEdgeId"):
+            # 路线边冻结检测：目标节点有敌方有效设卡时服务端会冻住移动进度
+            # （平台实测：demo 掐着我们上边的时机设卡，冻了 180 帧导致未交付）。
+            # 边上主车队不能攻坚/强通（状态限制），但小分队动作不受限 -> 持续削弱。
+            nxt = me.get("nextNodeId")
+            if nxt and state.enemy_guard(nxt):
+                if state.phase != P.PHASE_RUSH and (me.get("squadAvailable") or 0) >= 2:
+                    self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
+                return None
             # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）
             res = me.get("resources") or {}
             if not state.has_move_buff():
@@ -314,6 +324,10 @@ class PlannerStrategy(BaselineStrategy):
             return P.a_wait()
         if state.enemy_guard(nxt):
             return self._breakthrough(state, nxt, plan)
+        if self._opp_setting_guard(state, nxt):
+            # 对手正在下一跳读条设卡：此时上边会在半路被冻结（边上不能攻坚），
+            # 等 1~4 帧卡成型后站在节点上攻坚拆掉再走，代价小一个数量级
+            return P.a_wait()
         return P.a_move(nxt)
 
     # ---------- 突破敌方设卡 ----------
@@ -392,6 +406,13 @@ class PlannerStrategy(BaselineStrategy):
         proc = state.opp.get("currentProcess") or {}
         return proc.get("targetNodeId") == node_id and \
             (proc.get("action") or proc.get("type")) in ("PROCESS", "DOCK")
+
+    @staticmethod
+    def _opp_setting_guard(state, node_id):
+        """对手是否正在目标节点读条设卡（currentProcess 公开可见）。"""
+        proc = state.opp.get("currentProcess") or {}
+        return proc.get("targetNodeId") == node_id and \
+            (proc.get("action") or proc.get("type")) == "SET_GUARD"
 
     # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------
     # 标记只活 45 帧：只探 SCOUT_MAX_ETA 帧内能赶到的目标；宫门验核最早
