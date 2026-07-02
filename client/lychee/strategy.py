@@ -169,6 +169,14 @@ class PlannerStrategy(BaselineStrategy):
 
     STALL_FRAMES = 8            # 移动进度停滞判定帧数（看门狗）
 
+    # ---- 主动设卡（V3）----
+    GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE"}  # 咽喉类节点
+    GUARD_MIN_OPP_ETA = 8       # 对手至少 8 帧后才到（4 帧读条 + 生效余量）
+    GUARD_MAX_OPP_ETA = 150     # 太远则风化/悬赏先到，白设
+    GUARD_SLACK_MIN = 80        # 自己交付余量充足才花这 4 帧
+    GUARD_ROUTE_TOLERANCE = 15  # 判断该节点是否在对手高效路线上的容差（帧）
+    GUARD_RETRY_GAP = 40        # 同一节点设卡重试间隔
+
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
@@ -179,6 +187,7 @@ class PlannerStrategy(BaselineStrategy):
         self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
         self._stall = (None, None, 0)    # (edgeId, progressMs, 连续停滞帧数)
+        self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
 
     # ---------- 每帧入口 ----------
 
@@ -337,6 +346,11 @@ class PlannerStrategy(BaselineStrategy):
         if plan.kind == "task" and cur == plan.position:
             return P.a_claim_task(plan.task["taskId"])
 
+        # 主动设卡：领先通过咽喉节点时，回手一张卡挡住身后的对手
+        guard = self._guard_opportunity(state, cur, plan)
+        if guard:
+            return guard
+
         # 顺路领取（截止余量充足时才花这 2 帧）
         if plan.kind == "task" or plan.slack > 80:
             stock = node.get("resourceStock") or {}
@@ -365,6 +379,66 @@ class PlannerStrategy(BaselineStrategy):
             # 等 1~4 帧卡成型后站在节点上攻坚拆掉再走，代价小一个数量级
             return P.a_wait()
         return P.a_move(nxt)
+
+    # ---------- 主动设卡（V3）----------
+    # demo 用这招连赢我们四局：在咽喉节点身后设卡，对手要么烧果攻坚、
+    # 要么吃 15+5×防守值 帧的强通税、要么等风化。成本仅 4 帧读条 + 0~3 好果。
+
+    def _guard_opportunity(self, state, cur, plan):
+        me, opp = state.me, state.opp
+        if state.phase == P.PHASE_RUSH or plan.slack < self.GUARD_SLACK_MIN:
+            return None
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        node = state.node(cur)
+        if node.get("nodeType") not in self.GUARD_NODE_TYPES:
+            return None
+        if cur == state.terminal_node:
+            return None  # S15 禁止设卡
+        g = node.get("guard")
+        if g and g.get("ownerTeamId"):  # 每节点同时只有 1 个有效卡
+            active = g.get("active", g.get("defense", 0) > 0)
+            if active:
+                return None
+        if state.round - self._guard_sent.get(cur, -999) < self.GUARD_RETRY_GAP:
+            return None
+        if self._my_active_guards(state) >= 2:
+            return None  # 每队上限 2 个，第 3 个会顶掉最早的
+
+        # 对手确实还要从这里过：ETA 在窗口内，且该节点在其高效路线上
+        opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if not opp_pos:
+            return None
+        g_graph = state.graph
+        opp_eta, path = g_graph.shortest_path(opp_pos, cur, P.BASE_SPEED)
+        if not path or not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
+            return None
+        opp_to_gate, p1 = g_graph.shortest_path(opp_pos, state.gate_node, P.BASE_SPEED)
+        here_to_gate, p2 = g_graph.shortest_path(cur, state.gate_node, P.BASE_SPEED)
+        if not p1 or not p2 or \
+                opp_eta + here_to_gate > opp_to_gate + self.GUARD_ROUTE_TOLERANCE:
+            return None  # 绕开我们这里更快，卡了也白卡
+
+        # 成本：关键关隘/宫门底价 1 好果 + 额外 2 好果拉满防守值 6
+        # （防 2 的卡 30 帧就风化半残，不值底价；投不满就不投）
+        good = me.get("goodFruit", 0)
+        base_cost = 1 if node.get("nodeType") in ("KEY_PASS", "GATE") else 0
+        extra = 2
+        if good - base_cost - extra <= self.MIN_GOOD_RESERVE:
+            return None  # 好果太紧，不做对抗投资
+        self._guard_sent[cur] = state.round
+        if self.log:
+            self.log.info("set guard @%s extra=%d (opp eta=%d)", cur, extra, opp_eta)
+        return P.a_set_guard(cur, extra)
+
+    def _my_active_guards(self, state):
+        n = 0
+        for node in state.nodes.values():
+            g = node.get("guard")
+            if g and g.get("ownerTeamId") == state.my_team \
+                    and g.get("active", g.get("defense", 0) > 0):
+                n += 1
+        return n
 
     # ---------- 突破敌方设卡 ----------
     # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
