@@ -199,7 +199,8 @@ def test_planner():
             if p["playerId"] == 1001:
                 p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
                          currentProcess=None, currentNodeId=node,
-                         taskScore=task_score, buffs=[])
+                         taskScore=task_score, buffs=[],
+                         freshness=95.0, resources={})  # 需要测冰的场景显式设置
         gs.on_inquire(d)
         return gs
 
@@ -322,7 +323,7 @@ def test_contention():
         for p in d["players"]:
             p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
                      currentProcess=None, currentNodeId="S02", buffs=[],
-                     taskScore=0)
+                     taskScore=0, freshness=95.0, resources={})
         for n in d["nodes"]:
             if n["nodeId"] == "S02":
                 n.update(processType="TRANSFER", processRound=4)
@@ -540,6 +541,64 @@ def test_edge_block():
     return ok
 
 
+def test_p0_audit():
+    """策略自查修复回归：交付后静默 / 等待时用冰 / 任务资源前置。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def st_at(node, **me_kw):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["tasks"] = []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                         currentProcess=None, currentNodeId=node, buffs=[],
+                         resources={}, freshness=95.0)
+                p.update(me_kw)
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 交付后：即使有窗口在列，也一个动作不发（交付后违规每次 -5）
+    gs = st_at("S15", delivered=True)
+    a = PlannerStrategy().decide(gs)
+    ok &= check("交付后: 完全静默(有窗口也不出牌)", a == [],
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 宫门等 RUSH 时鲜度低有冰鉴 -> 先用冰而不是干等
+    gs = st_at("S14", freshness=84.0, resources={"ICE_BOX": 1})
+    gs.contests = []
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("等待中: 宫门等 RUSH 也用冰鉴",
+                a and a["action"] == "USE_RESOURCE" and a["resourceType"] == "ICE_BOX",
+                str(a))
+
+    # 3) 缺前置资源的任务（T06 需马）不再被规划
+    gs = st_at("S09", resources={})
+    gs.contests = []
+    gs.task_templates = {"T06": {"taskTemplateId": "T06",
+                                 "requiredResourceTypes": ["FAST_HORSE", "SHORT_HORSE"]}}
+    gs.tasks = [{"taskId": "T_X6", "taskTemplateId": "T06", "nodeId": "S09",
+                 "processRound": 3, "score": 30, "expireRound": 0,
+                 "active": True, "completed": False, "failed": False,
+                 "ownerPlayerId": 0, "protectionPlayerId": 0}]
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    ok &= check("任务前置: 无马不接 T06", plan.kind == "deliver", repr(plan))
+    # 有马则接（就在脚下，净收益为正）
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["resources"] = {"SHORT_HORSE": 1}
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("任务前置: 有马就接 T06",
+                plan.kind == "task" and plan.task["taskId"] == "T_X6", repr(plan))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -547,6 +606,7 @@ def main():
     ok &= test_contention()
     ok &= test_breakthrough()
     ok &= test_edge_block()
+    ok &= test_p0_audit()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

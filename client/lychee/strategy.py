@@ -180,8 +180,13 @@ class PlannerStrategy(BaselineStrategy):
 
     def decide(self, state):
         self._absorb_feedback(state)
-        actions = []
 
+        # 交付后除 WAIT/重复交付外任何主动动作每次扣 5 分（7.4）：
+        # 窗口牌、小分队都不许再发；被动进 PASS 窗口按弃权处理不扣分
+        if state.me.get("delivered") or state.me.get("retired"):
+            return []
+
+        actions = []
         plan = self.planner.plan(state)
         if self.log and state.round % 20 == 0:
             self.log.debug("plan: %r", plan)
@@ -264,6 +269,12 @@ class PlannerStrategy(BaselineStrategy):
         verified = me.get("verified")
         plan = plan or self.planner.plan(state)
 
+        # 保鲜优先于一切等待/交付：+10 鲜度 ≈ 18 分，交付前一帧用也稳赚，
+        # 且在宫门等 RUSH、终点等交付的空闲帧里防止跌破转坏阈值
+        res = me.get("resources") or {}
+        if me.get("freshness", 100) < self.USE_ICE_BELOW and res.get(P.ICE_BOX, 0) > 0:
+            return P.a_use_resource(P.ICE_BOX)
+
         # 终点交付
         if cur == terminal:
             if verified and me.get("goodFruit", 0) > 0 and me.get("freshness", 0) > 0:
@@ -295,11 +306,6 @@ class PlannerStrategy(BaselineStrategy):
         # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）
         if plan.kind == "task" and cur == plan.position:
             return P.a_claim_task(plan.task["taskId"])
-
-        # 保鲜
-        res = me.get("resources") or {}
-        if me.get("freshness", 100) < self.USE_ICE_BELOW and res.get(P.ICE_BOX, 0) > 0:
-            return P.a_use_resource(P.ICE_BOX)
 
         # 顺路领取（截止余量充足时才花这 2 帧）
         if plan.kind == "task" or plan.slack > 80:

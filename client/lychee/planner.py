@@ -114,6 +114,15 @@ class TaskPlanner:
     def _evaluate(self, state, task, cur, base, to_gate, eta_direct,
                   slack, speed, penalty):
         """返回 (净收益, 停靠节点)；不可行返回 None。"""
+        # 资源前置：如 T06 启动时要消耗 1 匹马；缺前置资源跑过去只会被拒
+        # （requiredResourceTypes 语义为「任一满足」，如 快马/短程马 二选一）
+        tpl = state.task_templates.get(task.get("taskTemplateId")) or {}
+        required = tpl.get("requiredResourceTypes") or []
+        if required:
+            res = state.me.get("resources") or {}
+            if not any(res.get(rt, 0) > 0 for rt in required):
+                return None
+
         g = state.graph
         pos, f_to = self._position_for(state, task, cur, speed, penalty)
         if pos is None:
