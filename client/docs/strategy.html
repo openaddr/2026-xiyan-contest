@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.0-activeguard)</title>
+<style>
+  .viz-root {
+    --surface-1: #fcfcfb;
+    --surface-2: #f0efec;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #8a8985;
+    --border: #d8d7d2;
+    --main-c: #2a78d6;     /* 主车队动作 (slot1 blue) */
+    --squad-c: #1baf7a;    /* 小分队动作 (slot2 aqua) */
+    --window-c: #eda100;   /* 窗口出牌 (slot3 yellow) */
+    --rush-c: #008300;     /* 终局急策 (slot4 green) */
+    --critical: #d03b3b;   /* 兜底/危险路径 */
+    --good: #0ca30c;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --surface-1: #1a1a19;
+      --surface-2: #383835;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8b8a83;
+      --border: #4a4945;
+      --main-c: #3987e5;
+      --squad-c: #199e70;
+      --window-c: #c98500;
+      --rush-c: #008300;
+      --critical: #e66767;
+      --good: #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-1); color: var(--text-primary);
+         font: 15px/1.65 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .viz-root { max-width: 980px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 48px 0 12px; padding-top: 24px; border-top: 1px solid var(--border); }
+  h3 { font-size: 16px; margin: 24px 0 8px; }
+  .sub { color: var(--text-secondary); margin: 0 0 8px; }
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 10px;
+           font-size: 12px; font-weight: 600; border: 1.5px solid var(--border); }
+  .toc { background: var(--surface-2); border-radius: 10px; padding: 14px 22px; margin: 20px 0; }
+  .toc a { color: var(--text-primary); text-decoration: none; }
+  .toc li { margin: 3px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  th { background: var(--surface-2); }
+  code { background: var(--surface-2); padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+
+  /* ------- 流程图 ------- */
+  .flow { margin: 16px 0; }
+  .node { position: relative; border: 1.5px solid var(--border); border-radius: 8px;
+          padding: 8px 14px; margin: 0 auto; max-width: 620px; background: var(--surface-1); }
+  .node .tag { font-size: 11px; font-weight: 700; letter-spacing: .5px; color: var(--text-muted); }
+  .decision { border-style: dashed; border-color: var(--text-muted); background: var(--surface-2); }
+  .act-main   { border-left: 5px solid var(--main-c); }
+  .act-squad  { border-left: 5px solid var(--squad-c); }
+  .act-window { border-left: 5px solid var(--window-c); }
+  .act-rush   { border-left: 5px solid var(--rush-c); }
+  .act-crit   { border-left: 5px solid var(--critical); }
+  .act-good   { border-left: 5px solid var(--good); }
+  .arrow { text-align: center; color: var(--text-muted); font-size: 15px; line-height: 1.4; }
+  .arrow small { display: block; font-size: 12px; }
+  .branch { display: flex; gap: 14px; align-items: flex-start; justify-content: center; flex-wrap: wrap; }
+  .branch > div { flex: 1; min-width: 260px; }
+  .lbl { text-align: center; font-size: 12.5px; font-weight: 700; color: var(--text-secondary); margin: 2px 0; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 14px 0; font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+
+  /* 决策清单式子图 */
+  .steps { counter-reset: s; padding-left: 0; }
+  .steps > li { list-style: none; margin: 8px 0; padding: 8px 12px 8px 44px; position: relative;
+                border: 1px solid var(--border); border-radius: 8px; }
+  .steps > li::before { counter-increment: s; content: counter(s);
+    position: absolute; left: 12px; top: 10px; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--surface-2); border: 1px solid var(--border);
+    font-size: 12px; font-weight: 700; text-align: center; line-height: 22px; }
+  .ret { font-weight: 700; }
+  .chart-wrap { position: relative; margin: 16px 0; }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 12.5px;
+    display: none; white-space: nowrap; z-index: 3; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 13.5px; }
+  .foot { margin-top: 48px; color: var(--text-muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+
+<h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.0-activeguard</span>
+   · 71 项自测覆盖 · 生成于 2026-07-02</p>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+  <li><a href="#arch">架构分层</a></li>
+  <li><a href="#frame">每帧决策总流程 decide()</a></li>
+  <li><a href="#planner">任务规划器 plan() 与分数模型</a></li>
+  <li><a href="#main">主车队决策树 main_action()</a></li>
+  <li><a href="#break">突破敌方设卡（四级梯队）</a></li>
+  <li><a href="#guard">主动设卡（V3 进攻）</a></li>
+  <li><a href="#squad">小分队决策</a></li>
+  <li><a href="#card">窗口出牌博弈</a></li>
+  <li><a href="#defense">防御与工程机制</a></li>
+  <li><a href="#params">可调参数总表</a></li>
+  <li><a href="#history">版本演进与败局教训</a></li>
+</ol>
+</div>
+
+<div class="legend">
+  <span><span class="sw" style="background:var(--main-c)"></span>主车队动作（每帧1个）</span>
+  <span><span class="sw" style="background:var(--squad-c)"></span>小分队动作（每帧1个）</span>
+  <span><span class="sw" style="background:var(--window-c)"></span>窗口出牌（每帧1张）</span>
+  <span><span class="sw" style="background:var(--rush-c)"></span>终局急策（整局1次）</span>
+  <span><span class="sw" style="background:var(--critical)"></span>兜底/抢救路径</span>
+  <span><span class="sw" style="border:1.5px dashed var(--text-muted)"></span>判断节点</span>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="arch">1. 架构分层</h2>
+<table>
+<tr><th>层</th><th>模块</th><th>职责</th></tr>
+<tr><td>通信</td><td><code>lychee_basic_client</code>（官方）</td><td>TCP 5位长度前缀分帧、半包/粘包、registration→start→ready→inquire/action→over</td></tr>
+<tr><td>会话</td><td><code>session.py</code></td><td>StrategySession 继承官方 ClientSession；决策异常兜底发空心跳 <code>actions:[]</code>（永不缺帧）；决策 &gt;300ms 告警；error 消息记录后继续（不退出）</td></tr>
+<tr><td>状态</td><td><code>state.py</code></td><td>缓存 start 静态数据（地图/角色点/任务候选），每帧吸收 inquire；封装 enemy_guard / 阻挡 / 窗口 / 可领任务判断</td></tr>
+<tr><td>地图</td><td><code>world.py</code></td><td>Dijkstra 寻路（按帧数），到站帧数 = ceil(距离×耗时系数)/每帧移动量；阻挡节点惩罚计入</td></tr>
+<tr><td>规划</td><td><code>planner.py</code></td><td>任务估值、交付截止硬约束、马匹预留、帧价值</td></tr>
+<tr><td>策略</td><td><code>strategy.py</code></td><td>每帧动作合成（本文档主体）</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="frame">2. 每帧决策总流程 decide()</h2>
+<div class="flow">
+  <div class="node"><span class="tag">入口</span><br>收到 inquire(round=N) → <code>_absorb_feedback</code>：
+    停靠节点变更重置处理标记 · 吸收 PROCESS_REQUIRED / PROCESS_COMPLETE / VERIFY_GATE_COMPLETE ·
+    移动停滞计数（看门狗）· 记录 FORCED_PASS_END 节点 · CLAIM_TASK 被拒→拉黑该任务 40 帧</div>
+  <div class="arrow">↓</div>
+  <div class="node decision">已交付 (delivered) 或已退赛 (retired)？</div>
+  <div class="branch">
+    <div>
+      <div class="lbl">是</div>
+      <div class="node act-crit">返回 <span class="ret">[]</span> 完全静默<br>
+      <small>交付后除 WAIT/重复交付外任何主动动作每次 −5 分（含窗口牌）</small></div>
+    </div>
+    <div>
+      <div class="lbl">否 ↓</div>
+      <div class="node"><span class="tag">规划</span><br><code>plan = planner.plan(state)</code>
+        → 得到 <b>task</b>（去做某任务）/ <b>deliver</b>（直奔交付线）+ 交付余量 slack</div>
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="node act-window">① 窗口出牌 <span class="ret">WINDOW_CARD</span>（若有本队未结窗口）：
+    多窗口按「计划中任务 &gt; 宫门 &gt; 其他」选 1 个，混合策略出牌（见 §8）；其余窗口自动弃权</div>
+  <div class="arrow">↓</div>
+  <div class="node act-main">② 主车队动作 = <code>main_action(plan)</code>（见 §4 决策树）</div>
+  <div class="arrow">↓</div>
+  <div class="node act-squad">③ 小分队动作 = <code>squad_action(plan)</code>（见 §7）</div>
+  <div class="arrow">↓</div>
+  <div class="node decision">动作包非空 且 MOVING 且 无主车队动作 且 下一跳无敌卡？</div>
+  <div class="branch">
+    <div><div class="lbl">是</div>
+      <div class="node act-main">补发 <span class="ret">MOVE(当前目标)</span><br>
+      <small>服务端实测：移动中只发小分队/窗口动作会暂停本帧推进；被冻结时不补（会被拒）</small></div></div>
+    <div><div class="lbl">否</div><div class="node">直接发送动作包（空则为有效心跳）</div></div>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="planner">3. 任务规划器 plan() 与分数模型</h2>
+
+<h3>3.1 分数模型：任务基础分是全场最大杠杆</h3>
+<p class="sub">送达 + 任务 + 用时 三项合计随任务基础分的变化（按原始用时分 25 估算）。
+0→90 每 1 点基础分 ≈ 3 分综合收益；90 后骤降 → 策略档位「保 90 冲 110+」。</p>
+
+<div class="chart-wrap" id="scoreChart"></div>
+<details><summary>数据表（无障碍视图）</summary>
+<table><tr><th>任务基础分</th><th>送达分</th><th>任务分(含里程碑)</th><th>用时分</th><th>合计</th></tr>
+<tr><td>0</td><td>120</td><td>0</td><td>0</td><td>120</td></tr>
+<tr><td>30</td><td>160</td><td>30</td><td>8</td><td>198</td></tr>
+<tr><td>60</td><td>200</td><td>75</td><td>16</td><td>291</td></tr>
+<tr><td>90</td><td>240</td><td>125</td><td>25</td><td>390</td></tr>
+<tr><td>110</td><td>240</td><td>160</td><td>25</td><td>425</td></tr>
+<tr><td>130+</td><td>240</td><td>180(封顶)</td><td>25</td><td>445</td></tr></table>
+</details>
+
+<h3>3.2 plan() 流程</h3>
+<ol class="steps">
+  <li>规划锚点 = 停靠节点（移动中取当前目标节点）</li>
+  <li><b>直达 ETA</b> = 到宫门(含阻挡惩罚: 敌卡+35 / 障碍+10) + 验核6 + 宫门→终点 + 交付2；
+      <b>slack</b> = 600 − 当前帧 − ETA − 安全余量60</li>
+  <li>已验核 → <span class="ret">deliver</span>（离宫门要重新验核，不再接任务）</li>
+  <li>slack ≤ 0 → <span class="ret">deliver</span>（抢救模式：放弃一切任务）</li>
+  <li>逐个估值可领任务（活跃、无主或归我、保护期非对方、不在黑名单）：
+    <ul>
+      <li><b>资源前置</b>：requiredResourceTypes 任一满足；T06 硬规则兜底需要 1 匹马——没马直接跳过</li>
+      <li><b>站位</b>：T04 清障可在障碍节点或相邻节点；其余须到任务节点</li>
+      <li><b>读条</b>：有本队探路标记 −3 帧（最低 2）</li>
+      <li><b>过期</b>：当前帧 + 赶路 + 读条 ≤ expireRound</li>
+      <li><b>绕路</b> = 去任务点 + 任务点→宫门 − 直达宫门；<b>硬约束</b> 绕路+读条 ≤ slack</li>
+      <li><b>估值</b> = 边际任务收益（按 3.1 曲线）×（对手更近则 ×0.5；对手正在处理→放弃）
+          − (绕路+读条) × 帧价值 0.227/帧（鲜度 0.11 + 用时 0.117，恒计）</li>
+    </ul></li>
+  <li>净收益最高且 &gt; 0 → <span class="ret">task</span>；否则 <span class="ret">deliver</span></li>
+</ol>
+
+<h3>3.3 马匹预留（horses_reserved）</h3>
+<div class="node">锁定 1 匹马不骑，当且仅当：非 RUSH 阶段 <b>且</b> 任务基础分 &lt; 110 <b>且</b>
+（当前任务列表有可做的耗马任务 <b>或</b> 地图配置会刷 T06 且当前帧 &lt; 350）。<br>
+<small>教训：骑掉唯一的马只省 ~2 帧 ≈ 0.5 分，却让两个 T06（各 30 基础分）全部做不了。</small></div>
+
+<!-- ================================================================ -->
+<h2 id="main">4. 主车队决策树 main_action()</h2>
+<div class="flow">
+  <div class="node decision">退赛 / 已交付？ → 是：<span class="ret">无动作</span></div>
+  <div class="arrow">↓ 否</div>
+  <div class="node decision">忙碌状态（处理中/休整/强通/验核/窗口争夺）？ → 是：<span class="ret">无动作</span>（等结算）</div>
+  <div class="arrow">↓ 否</div>
+  <div class="node decision">正在路线边上移动 (routeEdgeId)？</div>
+  <div class="branch">
+    <div>
+      <div class="lbl">是 —— 边上分支</div>
+      <div class="node act-crit">a. 下一跳有敌方有效卡（冻结中）→ 标记削弱目标交给小分队，<span class="ret">无动作</span></div>
+      <div class="arrow">↓</div>
+      <div class="node act-crit">b. 看门狗：进度停滞 ≥8 帧且无可见敌卡 → <span class="ret">MOVE(改道替代邻点)</span></div>
+      <div class="arrow">↓</div>
+      <div class="node act-main">c. 无移动增益且马匹 &gt; 预留量 → <span class="ret">USE_RESOURCE(快马/短程马)</span></div>
+      <div class="arrow">↓</div>
+      <div class="node">d. 否则<span class="ret">无动作</span>（系统继续推进）</div>
+    </div>
+    <div>
+      <div class="lbl">否 —— 停靠分支（按序判断，命中即返回）</div>
+      <ol class="steps">
+        <li class="act-main" style="border-left:5px solid var(--main-c)">鲜度 &lt; 91 且有冰鉴 →
+            <span class="ret">USE_RESOURCE(ICE_BOX)</span><br><small>优先于一切等待/交付：+10鲜度≈18分，防跌破 90/80/70… 转坏阈值</small></li>
+        <li>在终点 S15：已验核且好果&gt;0且鲜度&gt;0 → <span class="ret">DELIVER</span>；否则 <span class="ret">WAIT</span></li>
+        <li>在宫门 S14 未验核且计划=deliver：RUSH 阶段 → 急策未用先
+            <span class="ret" style="color:var(--rush-c)">RUSH_PROTECT</span>（护果令，30帧鲜度×0.2）再
+            <span class="ret">VERIFY_GATE</span>；非 RUSH → <span class="ret">WAIT</span></li>
+        <li>固定处理站未完成：对手正在处理本站 → <span class="ret">WAIT</span>（排队）；
+            奇偶错峰命中 → <span class="ret">WAIT</span>（避免同帧创建窗口）；否则 <span class="ret">PROCESS</span></li>
+        <li>计划=task 且已到任务站位 → <span class="ret">CLAIM_TASK</span>（独占对象，不让行）</li>
+        <li>主动设卡机会（§6 条件全满足）→ <span class="ret">SET_GUARD(防守值6)</span></li>
+        <li>顺路领取（计划=task 或 slack&gt;80）：冰鉴上限2、快马/短程马各1；
+            错峰命中先 <span class="ret">WAIT</span> 一帧 → <span class="ret">CLAIM_RESOURCE</span></li>
+        <li>赶路（目标 = 任务点 / 未验核→宫门 / 已验核→终点，寻路含阻挡惩罚）：<br>
+            下一跳有障碍无卡：好果&gt;1 → <span class="ret">CLEAR</span> 否则 <span class="ret">WAIT</span><br>
+            下一跳有敌卡 → <b>突破梯队</b>（§5）<br>
+            对手正在下一跳读条设卡 → <span class="ret">WAIT</span>（等卡成型后节点攻坚，绝不上边挨冻）<br>
+            畅通 → <span class="ret">MOVE(下一跳)</span></li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="break">5. 突破敌方设卡（四级梯队）</h2>
+<p class="sub">教训：曾在 S09 干等 S10 敌卡风化 175 帧直接未交付（80:525）。等待永远是最后的选项。</p>
+<div class="flow">
+  <div class="node act-main">① <span class="ret">BREAK_GUARD</span> 一击必破（无读条）：
+    攻坚值 = 好果×2 + 坏果×3（各≤2篓）≥ 防守值。投入搜索最小成本：坏果优先（本身近乎废物），
+    好果保留 5 篓交付底仓</div>
+  <div class="arrow">↓ 果品不够破</div>
+  <div class="node act-squad">② 小分队削弱（slack&gt;0 且非 RUSH 且人手≥2）：
+    <span class="ret">SQUAD_WEAKEN</span> 每次防守 −2（重发间隔 12 帧），主车队原地 WAIT，削到能破转 ①</div>
+  <div class="arrow">↓ 人手不足 / 截止吃紧</div>
+  <div class="node act-main">③ <span class="ret">FORCED_PASS</span> 强制通行兜底：
+    时间税 min(50, 15+防守×5)（关键关隘），远好于等风化；守方胜出则休整后重试。
+    规则限制：上次强通到达的节点不能重复强通</div>
+  <div class="arrow">↓ 全部不可行</div>
+  <div class="node act-crit">④ <span class="ret">WAIT</span>（仅剩规则限制时）</div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="guard">6. 主动设卡（V3 进攻）</h2>
+<p class="sub">demo 用这一招连赢我们四局。成本 ~5 帧 + 1~3 好果（≈4~7 分）；
+对手的任何应对都更贵：强通税 35~50 帧、攻坚烧 2~4 篓果、削弱耗 4+ 人手 + 30 帧。</p>
+<div class="flow">
+  <div class="node decision">全部条件（按序短路）：<br>
+    ① 非 RUSH 且 slack &gt; 80（自己交付无忧）<br>
+    ② 对手存在且未交付未退赛<br>
+    ③ 当前节点是咽喉类型 {KEY_PASS 关键关隘, PASS 关隘, MOUNTAIN_PASS 栈道, GATE 宫门}，非 S15<br>
+    ④ 节点当前无有效卡（谁的都算）；同节点重试间隔 40 帧<br>
+    ⑤ 本队有效卡 &lt; 2（上限 2，第 3 张顶掉最早的）<br>
+    ⑥ 对手到本节点 ETA ∈ [8, 150] 帧（8=读条4帧+生效余量；150=再远卡先风化/生悬赏）<br>
+    ⑦ 本节点在对手去宫门的高效路线上（经此绕路 ≤ 15 帧容差）<br>
+    ⑧ 好果 − 底价(关隘/宫门1) − 额外2 &gt; 底仓5（投不满防守值 6 就不投）</div>
+  <div class="arrow">↓ 全满足</div>
+  <div class="node act-main"><span class="ret">SET_GUARD(extraGoodFruit=2)</span> → 防守值 6 ·
+    关键关隘防6首次风化 45 帧后 · 阻断对手 MOVE，逼其进入 §5 的代价选择</div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="squad">7. 小分队决策 squad_action()</h2>
+<p class="sub">人手初始 8。服务端 squadAvailable 字段缺失时用本地账本兜底（探路−1 / 削弱−2）。RUSH 阶段禁止新派。</p>
+<div class="flow">
+  <div class="node act-squad">优先级 1 —— <span class="ret">SQUAD_WEAKEN(削弱目标)</span>：
+    主车队被卡/被冻结时由 §4/§5 标记，人手≥2 即发（主车队正在流血，每帧都亏）</div>
+  <div class="arrow">↓ 无削弱需求</div>
+  <div class="node act-squad">优先级 2 —— <span class="ret">SQUAD_SCOUT(探路)</span>，目标按序：<br>
+    · 宫门（仅当前帧 ≥ 355：验核最早 ~390 开放，标记只活 45 帧，早派必过期）<br>
+    · 计划任务点（人未到才探——就地开读条吃不到减时；人手 &gt; 1 才派）<br>
+    通过条件：目标无本队有效标记 · 同目标重发间隔 25 帧 · 到目标 ETA ≤ 40 帧（否则标记先过期）<br>
+    <small>效果：探路标记使该点处理帧数 −3（最低2）——宫门验核 6→3，读条任务同理</small></div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="card">8. 窗口出牌博弈 pick_card()</h2>
+<p class="sub">确定性出牌遇同水平对手会陷入平局链（休整3帧+抑制18帧，镜像局曾因此双双 0 分）。
+采用加权随机混合策略，可负担的牌按强度加权：</p>
+<table>
+<tr><th>牌</th><th>成本</th><th>克制</th><th>权重（可负担时）</th></tr>
+<tr><td>强行 QIANG_XING</td><td>有马类/疾行令增益时<b>免费</b>，否则耗 1 马</td><td>胜献贡</td><td>3.0（仅增益期入池）</td></tr>
+<tr><td>兵争 BING_ZHENG</td><td>1 护卫行动点（初始4，无其他用途=免费筹码）</td><td>胜验牒/强行</td><td>3.0</td></tr>
+<tr><td>献贡 XIAN_GONG</td><td>1 好果，要求鲜度 ≥80（好果&gt;2 才入池）</td><td>胜验牒/兵争</td><td>2.0</td></tr>
+<tr><td>验牒 YAN_DIE</td><td>1 文书（过所/官凭）</td><td>胜强行</td><td>1.5</td></tr>
+<tr><td>弃权 ABSTAIN</td><td>0</td><td>—</td><td>资源窗口 1.5（低价值少花钱）/ 其他 0.5</td></tr>
+</table>
+<div class="node">多窗口同帧只能出 1 张：优先「计划中的任务窗口」→「宫门 GATE」→ 其他；未出牌的窗口自动按弃权结算，无惩罚</div>
+
+<!-- ================================================================ -->
+<h2 id="defense">9. 防御与工程机制</h2>
+<table>
+<tr><th>机制</th><th>触发</th><th>作用</th></tr>
+<tr><td>奇偶错峰</td><td>对手与我同节点空闲，(帧号+playerId)%2==1</td><td>让行 1 帧使一方先占读条对象，窗口根本不创建（根治镜像死锁：曾 195 次平局锁死 557 帧）</td></tr>
+<tr><td>排队等待</td><td>对手正在处理我所在站点流程</td><td>WAIT 到它完成，OBJECT_BUSY 是免费的业务拒绝</td></tr>
+<tr><td>设卡预判</td><td>对手 currentProcess=SET_GUARD 在我下一跳（公开可见）</td><td>不上边！等卡成型后站在节点攻坚拆掉（半路被冻代价大一个数量级）</td></tr>
+<tr><td>冻结解冻</td><td>边上移动且下一跳有敌方有效卡（进度被服务端冻住）</td><td>连发 SQUAD_WEAKEN 拆卡（防6约30帧拆完 vs 风化180帧）</td></tr>
+<tr><td>停滞看门狗</td><td>MOVING 且 (边,进度) 连续 8 帧不变且无可见敌卡</td><td>改道本段起点其他邻点——任何未知原因的冻结最多损失 8 帧，不可能再冻到终场</td></tr>
+<tr><td>人手账本</td><td>inquire 缺 squadAvailable 字段</td><td>本地记账（8−已派出），防止削弱/探路被静默禁用</td></tr>
+<tr><td>任务黑名单</td><td>CLAIM_TASK 被拒（保护期/占用/过期等 6 种码）</td><td>拉黑 40 帧，不再撞墙</td></tr>
+<tr><td>交付后静默</td><td>delivered/retired</td><td>返回空动作，杜绝每次 −5 的交付后违规（含窗口牌）</td></tr>
+<tr><td>决策异常兜底</td><td>decide() 抛任何异常</td><td>发 <code>actions:[]</code> 有效心跳——连续 60 帧缺动作=退赛，绝不允许</td></tr>
+<tr><td>版本水印</td><td>启动横幅 + registration.version + 打包自检输出</td><td>杜绝旧包上平台（曾两次因旧包重演已修复的败局）</td></tr>
+<tr><td>打包防护</td><td>package.py 强制 start.sh LF + zip 内写 0755</td><td>Windows 打包不再产生 bash 起不来的包</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="params">10. 可调参数总表</h2>
+<table>
+<tr><th>参数</th><th>值</th><th>依据</th></tr>
+<tr><td>SAFETY_MARGIN 交付安全余量</td><td>60 帧</td><td>对冲 ETA 乐观误差（马速/天气/窗口）</td></tr>
+<tr><td>帧价值（绕路成本）</td><td>0.227/帧</td><td>鲜度 0.11 + 用时斜率 70/600（恒计：每绕1帧交付晚1帧）</td></tr>
+<tr><td>寻路惩罚</td><td>敌卡 +35 / 障碍 +10 帧</td><td>按真实处理代价（强通税/清障读条）估，估值与实际走的路同一套</td></tr>
+<tr><td>USE_ICE_BELOW 用冰阈值</td><td>鲜度 ≤ 90</td><td>+10 不溢出，且防跌破 90/80/… 好果转坏阈值</td></tr>
+<tr><td>CLAIM_LIMIT 领取上限</td><td>冰鉴 2 / 马各 1</td><td>冰鉴 +10鲜度 ≈ 18 分</td></tr>
+<tr><td>MIN_GOOD_RESERVE 好果底仓</td><td>5 篓</td><td>交付要求好果 &gt; 0，对抗投资不许掏空</td></tr>
+<tr><td>攻坚成本权重</td><td>好果 1.9 / 坏果 0.1</td><td>好果值 1.8 分/篓 + 平分决胜价值；坏果近乎废物</td></tr>
+<tr><td>SCOUT_MAX_ETA / GATE_SCOUT_FROM</td><td>40 帧 / 第 355 帧</td><td>标记寿命 45 帧；宫门验核最早 ~390 开放（曾浪费 6/8 人手在过期标记上）</td></tr>
+<tr><td>SCOUT/WEAKEN 重发间隔</td><td>25 / 12 帧</td><td>在途落地延迟 3~15 帧，防重复派人</td></tr>
+<tr><td>STALL_FRAMES 看门狗</td><td>8 帧</td><td>正常每帧至少走 ~700 移动量，8 帧零进度必为异常</td></tr>
+<tr><td>GUARD_* 设卡窗口</td><td>ETA∈[8,150] / slack&gt;80 / 容差15 / 重试40</td><td>见 §6 逐条注释</td></tr>
+<tr><td>马匹预留</td><td>1 匹（T06 在场/会刷 且 base&lt;110 且 r&lt;350 且非RUSH）</td><td>省 2 帧 vs 30 分任务</td></tr>
+<tr><td>任务档位</td><td>保 90 冲 110+</td><td>90 解锁满额送达 240 + 用时不折 + 里程碑 +35</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="history">11. 版本演进与败局教训</h2>
+<table>
+<tr><th>版本</th><th>内容</th><th>源自哪场败局/发现</th></tr>
+<tr><td>V1 task-planner</td><td>任务估值 + 截止硬约束 + 探路 + 出牌升级</td><td>分数模型推演（90 分档杠杆）</td></tr>
+<tr><td>V2.1 contention</td><td>奇偶错峰 + 混合出牌 + 移动补 MOVE</td><td>镜像局 0:0——S02 死锁 557 帧、195 次平局</td></tr>
+<tr><td>V2.2 score-squeeze</td><td>用冰阈值 90 / 冰鉴×2 / 探路时机 / 护果令</td><td>本地胜局日志：冰鉴 467 帧才用、6/8 人手标记过期</td></tr>
+<tr><td>V2.3 breakthrough</td><td>攻坚→削弱→强通四级梯队</td><td>平台 80:525——S09 干等 S10 敌卡风化 175 帧</td></tr>
+<tr><td>V2.4 edge-block</td><td>冻结解冻（边上削弱）+ 设卡预判</td><td>平台 80:699——demo 掐点设卡冻我们半路 180 帧</td></tr>
+<tr><td>2.5 horse+audit</td><td>马匹经济 + 帧价值恒计 + 交付后静默 + 任务资源前置 + 等待中用冰</td><td>三连败复盘：骑掉马丢 60 分、交付晚 63 帧、代码自查 3 个 P0</td></tr>
+<tr><td>2.5 buildguard</td><td>版本水印 + 停滞看门狗 + 人手账本</td><td>旧包上平台重演已修复败局（r91 骑马实锤）</td></tr>
+<tr><td><b>3.0 activeguard</b></td><td><b>主动设卡：领先过咽喉回手防6卡</b></td><td>demo 四局全靠这招赢——刀递到我们手里</td></tr>
+</table>
+
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.0-activeguard ·
+自测 <code>python3 selftest.py</code>（71 项）</p>
+</div>
+
+<script>
+(function () {
+  // §3.1 分数曲线（单序列，无图例；里程碑直标；悬停十字提示）
+  var pts = [];
+  function comp(b) {
+    var ms = b >= 110 ? 50 : b >= 90 ? 35 : b >= 60 ? 15 : 0;
+    var d = Math.min(240, 120 + Math.floor(b * 4 / 3));
+    var t = Math.min(180, b + ms);
+    var ti = Math.floor(25 * Math.min(b, 90) / 90);
+    return d + t + ti;
+  }
+  for (var b = 0; b <= 180; b += 5) pts.push([b, comp(b)]);
+
+  var W = 660, H = 300, ML = 46, MR = 16, MT = 18, MB = 34;
+  var pw = W - ML - MR, ph = H - MT - MB;
+  var xmax = 180, ymin = 100, ymax = 460;
+  function X(v) { return ML + v / xmax * pw; }
+  function Y(v) { return MT + (1 - (v - ymin) / (ymax - ymin)) * ph; }
+
+  var grid = '', yt = '';
+  [120, 200, 280, 360, 440].forEach(function (v) {
+    grid += '<line x1="' + ML + '" y1="' + Y(v) + '" x2="' + (W - MR) + '" y2="' + Y(v) +
+            '" stroke="var(--border)" stroke-width="1"/>';
+    yt += '<text x="' + (ML - 8) + '" y="' + (Y(v) + 4) + '" text-anchor="end" font-size="11" fill="var(--text-muted)">' + v + '</text>';
+  });
+  var xt = '';
+  [0, 30, 60, 90, 120, 150, 180].forEach(function (v) {
+    xt += '<text x="' + X(v) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="11" fill="var(--text-muted)">' + v + '</text>';
+  });
+
+  var path = pts.map(function (p, i) { return (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1); }).join('');
+
+  var miles = [[60, '60档 +15', comp(60)], [90, '90档 拿满送达+用时', comp(90)], [110, '110档 +50', comp(110)]];
+  var marks = '';
+  miles.forEach(function (m) {
+    marks += '<circle cx="' + X(m[0]) + '" cy="' + Y(m[2]) + '" r="4.5" fill="var(--main-c)" stroke="var(--surface-1)" stroke-width="2"/>' +
+      '<text x="' + X(m[0]) + '" y="' + (Y(m[2]) - 10) + '" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--text-secondary)">' + m[1] + '</text>';
+  });
+
+  var wrap = document.getElementById('scoreChart');
+  wrap.innerHTML =
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;max-width:' + W + 'px" role="img" ' +
+    'aria-label="送达+任务+用时合计分随任务基础分变化，90分档前斜率约3分/点">' +
+    grid + yt + xt +
+    '<line x1="' + ML + '" y1="' + (MT + ph) + '" x2="' + (W - MR) + '" y2="' + (MT + ph) + '" stroke="var(--text-muted)" stroke-width="1"/>' +
+    '<path d="' + path + '" fill="none" stroke="var(--main-c)" stroke-width="2"/>' + marks +
+    '<line id="xh" y1="' + MT + '" y2="' + (MT + ph) + '" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3,3" style="display:none"/>' +
+    '<circle id="hp" r="4" fill="var(--main-c)" style="display:none"/>' +
+    '<text x="' + (W - MR) + '" y="' + (H - 12) + '" text-anchor="end" font-size="11" fill="var(--text-secondary)">任务基础分 →</text>' +
+    '</svg><div class="tooltip" id="tt"></div>';
+
+  var svg = wrap.querySelector('svg'), tt = document.getElementById('tt'),
+      xh = document.getElementById('xh'), hp = document.getElementById('hp');
+  svg.addEventListener('mousemove', function (ev) {
+    var r = svg.getBoundingClientRect(), sx = W / r.width;
+    var mx = (ev.clientX - r.left) * sx;
+    var b = Math.round(Math.max(0, Math.min(xmax, (mx - ML) / pw * xmax)) / 5) * 5;
+    var v = comp(b);
+    xh.setAttribute('x1', X(b)); xh.setAttribute('x2', X(b)); xh.style.display = '';
+    hp.setAttribute('cx', X(b)); hp.setAttribute('cy', Y(v)); hp.style.display = '';
+    tt.style.display = 'block';
+    tt.style.left = (ev.clientX - r.left + 14) + 'px';
+    tt.style.top = (ev.clientY - r.top - 30) + 'px';
+    tt.textContent = '基础分 ' + b + ' → 合计 ' + v;
+  });
+  svg.addEventListener('mouseleave', function () {
+    tt.style.display = 'none'; xh.style.display = 'none'; hp.style.display = 'none';
+  });
+})();
+</script>
+</body>
+</html>
