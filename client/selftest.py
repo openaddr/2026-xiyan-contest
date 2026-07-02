@@ -457,10 +457,12 @@ def test_breakthrough():
                     for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 5) 截止吃紧 -> 跳过削弱直接强制通行
+    # 5) V3.8 改策：截止吃紧也按真实耗时选（削弱 32 帧 < 强通税 45），
+    #    人手够就削弱 —— replay25 曾因 slack<0 选强通吃了 100 帧
     a = PlannerStrategy().decide(blocked_state(defense=6, bad=0, round_no=520))
-    ok &= check("突破: 截止吃紧直接强通",
-                any(x["action"] == "FORCED_PASS" for x in a),
+    ok &= check("突破: 截止吃紧仍选更快的削弱",
+                any(x["action"] == "SQUAD_WEAKEN" for x in a)
+                and not any(x["action"] == "FORCED_PASS" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # 6) 规则限制：上次强通到达节点不能重复强通
@@ -1335,6 +1337,104 @@ def test_tempo_guard():
     return ok
 
 
+def test_replay25():
+    """V3.8 回归（replay25 三宗罪：冰被偷 / 回头 / 强通吃100帧）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def base_gs(my_pos, opp_pos, opp_next=None, opp_edge=None, opp_prog=0,
+                round_no=86, ice_nodes=(), tasks=(), squad=6, bad=0):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"] = []
+        d["tasks"] = list(tasks)
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=90.0, goodFruit=95,
+                         badFruit=bad, taskScore=60, squadAvailable=squad)
+            else:
+                p.update(state="MOVING" if opp_edge else "IDLE",
+                         currentNodeId=opp_pos, nextNodeId=opp_next,
+                         routeEdgeId=opp_edge, edgeTotalMs=34500,
+                         edgeProgressMs=opp_prog, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = ({"ICE_BOX": 1} if n["nodeId"] in ice_nodes else {})
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    T_S03 = {"taskId": "T_001", "taskTemplateId": "T01", "nodeId": "S03",
+             "processRound": 3, "score": 30, "expireRound": 300, "active": True,
+             "completed": False, "failed": False, "ownerPlayerId": 0,
+             "protectionPlayerId": 0}
+
+    # 1) 冰保卫：在 S03 有任务+冰，对手 S02→S03 边上快到 → 先领冰再做任务
+    gs = base_gs("S03", "S02", opp_next="S03", opp_edge="E02",
+                 opp_prog=28000, ice_nodes=("S03",), tasks=(T_S03,))
+    st = PlannerStrategy()
+    a = st.main_action(gs, st.planner.plan(gs))
+    ok &= check("冰保卫: 对手将至先领冰",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == "ICE_BOX", str(a))
+
+    # 2) 对手远（还在 S01）→ 正常先做任务
+    gs = base_gs("S03", "S01", ice_nodes=("S03",), tasks=(T_S03,))
+    st = PlannerStrategy()
+    a = st.main_action(gs, st.planner.plan(gs))
+    ok &= check("冰保卫: 对手远则任务优先",
+                a and a["action"] == "CLAIM_TASK", str(a))
+
+    # 3) 回头迟滞：刚从 S03 到 S02，回头目标被课税，前进免税
+    gs = base_gs("S02", "S07", round_no=100, ice_nodes=("S03",))
+    st = PlannerStrategy()
+    st.planner.back_node = "S03"
+    st.planner.back_until = 130
+    tax = st.planner._backtrack_tax(gs, "S02", "S03")
+    tax_fwd = st.planner._backtrack_tax(gs, "S02", "S04")
+    ok &= check("回头迟滞: 回头课税/前进免税",
+                tax == 25 and tax_fwd == 0, f"back={tax} fwd={tax_fwd}")
+    st.planner.back_until = 90
+    ok &= check("回头迟滞: 窗口过期免税",
+                st.planner._backtrack_tax(gs, "S02", "S03") == 0, "")
+
+    # 4) 突破选择：坏果破不动防6卡、人手够 → 削弱路径（即便 slack 为负）
+    gs = base_gs("S09", "S12", round_no=520, squad=6, bad=0)
+    for n in gs.nodes.values():
+        if n["nodeId"] == "S10":
+            n["guard"] = {"ownerTeamId": "BLUE", "defense": 6,
+                          "maxDefense": 7, "active": True}
+    st = PlannerStrategy()
+    acts = st.decide(gs)
+    ok &= check("突破: 削弱比强通快就削弱(不看slack)",
+                any(x["action"] == "SQUAD_WEAKEN" and x["targetNodeId"] == "S10"
+                    for x in acts)
+                and not any(x["action"] == "FORCED_PASS" for x in acts),
+                json.dumps(acts, ensure_ascii=False))
+
+    # 5) 人手不足 → 强通兜底不变
+    gs = base_gs("S09", "S12", round_no=520, squad=2, bad=0)
+    for n in gs.nodes.values():
+        if n["nodeId"] == "S10":
+            n["guard"] = {"ownerTeamId": "BLUE", "defense": 6,
+                          "maxDefense": 7, "active": True}
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("突破: 人手不足仍强通兜底",
+                a and a["action"] == "FORCED_PASS", str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1353,6 +1453,7 @@ def main():
     ok &= test_trap_proof()
     ok &= test_bundle()
     ok &= test_tempo_guard()
+    ok &= test_replay25()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

@@ -240,7 +240,13 @@ class PlannerStrategy(BaselineStrategy):
     # ---------- 反馈：任务被拒时临时拉黑 ----------
 
     def _absorb_feedback(self, state):
+        prev_station = self._last_stationary_node
         super()._absorb_feedback(state)
+        # 回头迟滞：到达新节点时，刚离开的节点进入迟滞窗口
+        if prev_station and self._last_stationary_node != prev_station \
+                and not state.me.get("routeEdgeId"):
+            self.planner.back_node = prev_station
+            self.planner.back_until = state.round + 40
         self._weaken_target = None
 
         # 移动进度停滞检测：MOVING 且 (edge, progress) 连续 N 帧不变
@@ -354,8 +360,14 @@ class PlannerStrategy(BaselineStrategy):
                 return P.a_wait()   # 对手已在处理本站流程：排队，不白挨拒绝
             return P.a_process()
 
-        # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）
+        # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）。
+        # V3.8 顺序修正：先抢会被偷的稀缺资源再做任务 —— replay25 我们在 S03
+        # 读任务条时，落后 5 帧的对手把冰从眼皮底下领走（r92），任务不会跑、
+        # 库存资源会。对手赶得上偷时，资源优先。
         if plan.kind == "task" and cur == plan.position:
+            steal_risk = self._contested_claim_first(state, cur, plan)
+            if steal_risk:
+                return steal_risk
             return P.a_claim_task(plan.task["taskId"])
 
         # 资源提货目标：到位就领（V3.2 冰鉴猎手；同帧撞车交给窗口博弈）
@@ -463,6 +475,23 @@ class PlannerStrategy(BaselineStrategy):
                 n += 1
         return n
 
+    def _contested_claim_first(self, state, cur, plan):
+        """任务前的稀缺资源保卫：对手赶得上在我们读条期间偷走时，先领。"""
+        me = state.me
+        res = me.get("resources") or {}
+        stock = state.node(cur).get("resourceStock") or {}
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        task_frames = (plan.task or {}).get("processRound", 4) or 4
+        window = task_frames + 4   # 任务读条 + 领取读条余量
+        if self.planner._opp_eta(state, cur) > window:
+            return None
+        # 只为高价值资源打断任务顺序（冰鉴 17 分；马预留另有机制）
+        if stock.get(P.ICE_BOX, 0) > 0 and res.get(P.ICE_BOX, 0) < 2:
+            return P.a_claim_resource(cur, P.ICE_BOX)
+        return None
+
     # ---------- 突破敌方设卡 ----------
     # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
     # 优先级：攻坚(坏果优先,瞬发) > 小分队削弱后攻坚 > 强制通行(时间税<=50帧) > 等。
@@ -482,10 +511,21 @@ class PlannerStrategy(BaselineStrategy):
                               target, defense, gf, bf)
             return P.a_break_guard(target, gf, bf)
 
-        # 2) 果品不够破：派小分队削弱（-2/次），主车队本帧等待
-        #    截止吃紧(slack<0)时跳过，直接走强制通行
-        if plan.slack > 0 and state.phase != P.PHASE_RUSH \
-                and self._squad_avail(state) >= 2:
+        # 2) 果品不够破：削弱 vs 强通按真实耗时选快的（V3.8：不再用 slack
+        #    闸门 —— replay25 在 r325 因 slack<0 跳过削弱选了强通，吃了
+        #    100 帧税+路程，实际比削弱路径慢 20+ 帧且截止越紧越输不起）
+        dispatches = (defense + 1) // 2
+        weaken_time = (dispatches - 1) * self.WEAKEN_RESEND_GAP + 8  # 落地延迟
+        node_type = state.node(target).get("nodeType")
+        if node_type == "KEY_PASS":
+            forced_tax = min(50, 15 + defense * 5)
+        elif node_type == "GATE":
+            forced_tax = min(32, 12 + defense * 5)
+        else:
+            forced_tax = min(40, 10 + defense * 5)
+        can_weaken = state.phase != P.PHASE_RUSH \
+            and self._squad_avail(state) >= dispatches * 2
+        if can_weaken and weaken_time <= forced_tax + 10:
             if state.round - self._weaken_sent.get(target, -999) >= self.WEAKEN_RESEND_GAP:
                 self._weaken_target = target  # squad_action 本帧发 SQUAD_WEAKEN
             return P.a_wait()

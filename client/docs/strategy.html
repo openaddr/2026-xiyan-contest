@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.7-tempo-guard)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.8-claim-order)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.7-tempo-guard</span>
-   · 105 项自测覆盖 · 生成于 2026-07-02</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.8-claim-order</span>
+   · 111 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -384,11 +384,12 @@
 <tr><td>3.4 honest-eta</td><td><b>时间与价值双成本分离：交付截止 slack 只用真实时间（阻挡+处理站+天气税），鲜度定价/阴影只用于方案比较；对手走廊预测改为合理路径并集（≤最优×1.25）</b></td><td>真实地图回放取证：价值定价混入 ETA 后开局估 542 帧（实际 454），slack=-26 第 2 帧进抢救模式——V3.2/3.3 的资源与任务估值被整体熔断，从未真正执行；对手 Dijkstra 最优是水路但实际走官道，单路径拒止判定失灵</td></tr>
 <tr><td>3.5 trap-proof</td><td><b>防中边陷阱：对手占着/将先到我们下一跳时不上边（等它离开，留卡则节点攻坚瞬拆）；对峙上限 30 帧防赖；无截止赌博例外（slack 越紧冻结越致命）</b></td><td>replay20 惨案 60:754 未交付：2614 连环中边掐卡——S10 陷阱花 6 人手削弱解冻，S11 二连掐时人手仅剩 1，冻至终场。设卡必须站在节点上（规则 6.2.1），它离开即永久安全，等待 10~30 帧远比冻结 180+ 帧便宜</td></tr>
 <tr><td>3.6 bundle</td><td><b>捆绑估值：任务点及沿途可领资源计入任务净值（点上全额+2帧、沿途半权，含竞速折扣与拒止）</b></td><td>replay21/22（741:774 / 742:775）：r2 任务二选一 T01@S03(官道,捆双冰) vs T08@S04(水路,捆一马)，单任务 argmax 选了水路——官道双冰第 6 次白送，鲜度 74 vs 91 又输 30 分。真实地图验证：r2 计划翻转为 T_001@S03 (net 54)</td></tr>
-<tr><td><b>3.7 tempo-guard</b></td><td><b>固定处理站不再奇偶让行（同帧撞车打 DOCK 窗口，4 张兵争+混合出牌）；对手 ETA 计入边上剩余进度</b></td><td>replay23：S02 让行送出 5 帧先手 → demo 必赢 S03 竞速 → 冰链归属在起跑线就定了（V3.6 的捆绑计划 r43 还是 S03，r48 正确回落水路）；主动设卡因边上对手被记为 ETA=0 上线以来从未触发（r287 武关教科书时机被拒），路线检查度量不一致同修</td></tr>
+<tr><td>3.7 tempo-guard</td><td><b>固定处理站不再奇偶让行（同帧撞车打 DOCK 窗口，4 张兵争+混合出牌）；对手 ETA 计入边上剩余进度</b></td><td>replay23：S02 让行送出 5 帧先手 → demo 必赢 S03 竞速 → 冰链归属在起跑线就定了（V3.6 的捆绑计划 r43 还是 S03，r48 正确回落水路）；主动设卡因边上对手被记为 ETA=0 上线以来从未触发（r287 武关教科书时机被拒），路线检查度量不一致同修</td></tr>
+<tr><td><b>3.8 claim-order</b></td><td><b>冰保卫（对手赶得上偷就先领资源再读任务条）；突破按真实耗时选削弱/强通（弃 slack 闸门）；回头迟滞（刚离开节点作首跳 +25 帧）</b></td><td>replay25 三宗罪：S03 读任务条时冰被落后 5 帧的对手偷走（r92）；slack&lt;0 跳过削弱选强通吃 100 帧（削弱只要 32）；走廊总价近似打平使 65 帧折返在绕路公式里"免费"。本局亮点：S02 窗口首胜、两次破卡+悬赏 30 —— 机制在运转，输在细节顺序</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.7-tempo-guard ·
-自测 <code>python3 selftest.py</code>（105 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.8-claim-order ·
+自测 <code>python3 selftest.py</code>（111 项）</p>
 </div>
 
 <script>

@@ -60,6 +60,10 @@ ROUTE_FRESH_FACTOR = {
 # 天气对鲜度的区域加成（任务书 2.5）：暴雨命中水路 ×1.3；酷暑全图 ×1.5
 WEATHER_FRESH_REGION = {("HEAVY_RAIN", P.WATER): 1.3}
 
+# 回头迟滞（V3.8）：刚离开的节点作为目标首跳的附加帧数与窗口期
+BACKTRACK_PENALTY = 25
+BACKTRACK_WINDOW = 40
+
 
 def milestone_bonus(base):
     if base >= 110:
@@ -111,6 +115,11 @@ class TaskPlanner:
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
+        # 回头迟滞（V3.8）：刚离开的节点在窗口期内作为目标首跳要付额外代价。
+        # replay25：走廊总价近似打平让 65 帧真实折返在绕路公式里"免费"，
+        # S03→S02→S04 的回头使我们晚 70 帧到 S09，正好撞上对手设卡循环。
+        self.back_node = None
+        self.back_until = -1
 
     # ================= 对外入口 =================
 
@@ -253,6 +262,7 @@ class TaskPlanner:
                 f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
                 if not path:
                     continue
+                f_to += self._backtrack_tax(state, cur, node_id)
                 f_back, back = g.shortest_path(node_id, state.gate_node, speed,
                                                penalty, ecost)
                 if not back:
@@ -301,6 +311,7 @@ class TaskPlanner:
         pos, f_to = self._position_for(state, task, cur, speed, penalty, ecost)
         if pos is None:
             return None
+        f_to += self._backtrack_tax(state, cur, pos)
 
         proc = task.get("processRound", 4) or 4
         if self._has_our_scout_mark(state, pos):
@@ -542,6 +553,15 @@ class TaskPlanner:
     def _opp_processing_task(state, task):
         proc = state.opp.get("currentProcess") or {}
         return proc.get("taskId") == task.get("taskId")
+
+    def _backtrack_tax(self, state, cur, target):
+        """目标需要经由刚离开的节点回头时的附加帧数（迟滞）。"""
+        if not self.back_node or state.round >= self.back_until or target == cur:
+            return 0
+        if self.back_node == target:
+            return BACKTRACK_PENALTY
+        nxt = state.graph.next_hop(cur, target)
+        return BACKTRACK_PENALTY if nxt == self.back_node else 0
 
     # ================= 马匹预留 =================
 
