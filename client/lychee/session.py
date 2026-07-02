@@ -17,7 +17,7 @@ from lychee_basic_client.session import ClientSession
 
 from .log import get_logger
 from .state import GameState
-from .strategy import BaselineStrategy
+from .strategy import PlannerStrategy
 
 
 def action_message(match_id, round_no, player_id, actions):
@@ -38,7 +38,7 @@ class StrategySession(ClientSession):
         super().__init__(sock, config)
         self.log = logger or get_logger(config.player_id)
         self.state = GameState(config.player_id)
-        self.strategy = strategy or BaselineStrategy(self.log)
+        self.strategy = strategy or PlannerStrategy(self.log)
 
     # ---------- 覆盖消息分发：接管 over / error ----------
 

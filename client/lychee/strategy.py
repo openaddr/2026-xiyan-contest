@@ -1,11 +1,13 @@
 """策略层。
 
 Strategy 是接口；BaselineStrategy 是能完整跑通「赶路 → 站点处理 → 验核 → 交付」
-主线的基线实现，作为后续策略迭代的骨架：
+主线的基线实现；PlannerStrategy 在其上接入任务规划器（保 90 冲 110+）、
+小分队探路和窗口出牌博弈。
 - 每帧返回 actions[]（最多 1 主车队动作 + 1 小分队动作 + 1 窗口出牌 + 1 急策）；
 - 用 events[]/actionResults[] 反馈修正本地状态（如站点处理是否完成）。
 """
 from . import protocol as P
+from .planner import TaskPlanner
 
 
 class Strategy:
@@ -147,4 +149,190 @@ class BaselineStrategy(Strategy):
         """基线：有免费强行就打，否则弃权。子类可覆盖做克制博弈。"""
         if state.has_move_buff():
             return P.CARD_QIANG_XING  # 有马类/疾行令增益时强行免消耗
+        return P.CARD_ABSTAIN
+
+
+class PlannerStrategy(BaselineStrategy):
+    """V1：任务规划（保 90 冲 110+）+ 小分队探路 + 窗口出牌升级。"""
+
+    SCOUT_RESEND_GAP = 25       # 同一目标探路重发间隔（防止在途期间重复派人）
+    SCOUT_RESERVE = 0           # 保留人手（V1 全部可用于探路）
+    CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)  # 顺路领取清单
+
+    def __init__(self, logger=None):
+        super().__init__(logger)
+        self.planner = TaskPlanner(logger)
+        self._scout_sent = {}   # nodeId -> 派出帧
+
+    # ---------- 每帧入口 ----------
+
+    def decide(self, state):
+        self._absorb_feedback(state)
+        actions = []
+
+        plan = self.planner.plan(state)
+        if self.log and state.round % 20 == 0:
+            self.log.debug("plan: %r", plan)
+
+        contests = state.my_open_contests()
+        if contests:
+            c = self._priority_contest(state, contests, plan)
+            actions.append(P.a_window_card(c["contestId"], self.pick_card(state, c)))
+
+        main = self.main_action(state, plan)
+        if main:
+            actions.append(main)
+
+        squad = self.squad_action(state, plan)
+        if squad:
+            actions.append(squad)
+        return actions
+
+    # ---------- 反馈：任务被拒时临时拉黑 ----------
+
+    def _absorb_feedback(self, state):
+        super()._absorb_feedback(state)
+        for action, code in state.my_rejections():
+            if action == "CLAIM_TASK" and code in (
+                    "TASK_REQUIREMENT_NOT_MET", "TASK_PROTECTED", "OBJECT_BUSY",
+                    "TASK_EXPIRED", "TASK_NOT_FOUND", "WINDOW_DRAW_RETRY_LIMIT"):
+                proc = state.me.get("currentProcess") or {}
+                tid = proc.get("taskId")
+                # 拒绝发生在上一帧，没有可靠 taskId 时拉黑当前计划任务
+                plan = self.planner.plan(state)
+                tid = tid or (plan.task or {}).get("taskId")
+                if tid:
+                    self.planner.blacklist_task(tid, state.round + 40)
+                    if self.log:
+                        self.log.info("blacklist task %s until r%d (%s)",
+                                      tid, state.round + 40, code)
+
+    # ---------- 主车队 ----------
+
+    def main_action(self, state, plan=None):
+        me = state.me
+        if not me or me.get("retired") or me.get("delivered"):
+            return None
+        if me.get("state") in P.BUSY_STATES:
+            return None
+        if me.get("routeEdgeId"):
+            # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）
+            res = me.get("resources") or {}
+            if not state.has_move_buff():
+                for horse in (P.FAST_HORSE, P.SHORT_HORSE):
+                    if res.get(horse, 0) > 0:
+                        return P.a_use_resource(horse)
+            return None  # 让系统继续推进
+
+        cur = me.get("currentNodeId")
+        gate, terminal = state.gate_node, state.terminal_node
+        verified = me.get("verified")
+        plan = plan or self.planner.plan(state)
+
+        # 终点交付
+        if cur == terminal:
+            if verified and me.get("goodFruit", 0) > 0 and me.get("freshness", 0) > 0:
+                return P.a_deliver()
+            return P.a_wait()
+
+        # 宫门验核（仅 RUSH）
+        if cur == gate and not verified and plan.kind == "deliver":
+            if state.phase == P.PHASE_RUSH:
+                return P.a_verify_gate()
+            return P.a_wait()
+
+        # 固定处理站点必须先处理完才能离站
+        node = state.node(cur)
+        needs_process = (node.get("processType") and node.get("processType") != "VERIFY"
+                         and node.get("processRound", 0) > 0)
+        if needs_process and not self._processed_here:
+            return P.a_process()
+
+        # 任务：已在执行位置就开始读条
+        if plan.kind == "task" and cur == plan.position:
+            return P.a_claim_task(plan.task["taskId"])
+
+        # 保鲜
+        res = me.get("resources") or {}
+        if me.get("freshness", 100) < self.USE_ICE_BELOW and res.get(P.ICE_BOX, 0) > 0:
+            return P.a_use_resource(P.ICE_BOX)
+
+        # 顺路领取（截止余量充足时才花这 2 帧）
+        if plan.kind == "task" or plan.slack > 80:
+            stock = node.get("resourceStock") or {}
+            for rt in self.CLAIM_EN_ROUTE:
+                if stock.get(rt, 0) > 0 and res.get(rt, 0) == 0:
+                    return P.a_claim_resource(cur, rt)
+
+        # 赶路：任务点 / 宫门 / 终点
+        target = plan.position if plan.kind == "task" else (terminal if verified else gate)
+        if target == cur:
+            return P.a_wait()
+        nxt = self._route_next_hop(state, cur, target)
+        if nxt is None:
+            return P.a_wait()
+        if state.has_obstacle(nxt):
+            if me.get("goodFruit", 0) > 1:
+                return P.a_clear(nxt)
+            return P.a_wait()
+        if state.enemy_guard(nxt):
+            return P.a_wait()  # 攻坚/强制通行留给 V2
+        return P.a_move(nxt)
+
+    def _route_next_hop(self, state, cur, target):
+        """与规划器共用同一套阻挡惩罚，保证走的路就是估值时算的路。"""
+        return state.graph.next_hop(cur, target, state.my_speed(),
+                                    self.planner._penalty_fn(state))
+
+    # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------
+
+    def squad_action(self, state, plan):
+        if state.phase == P.PHASE_RUSH:
+            return None  # 冲刺阶段禁止新派小分队
+        me = state.me
+        if (me.get("squadAvailable") or 0) <= self.SCOUT_RESERVE:
+            return None
+
+        cur = me.get("currentNodeId")
+        targets = []
+        # 任务点：人还没到才值得探（标记落地有延迟，就地开读条来不及吃到减时）
+        if plan.kind == "task" and plan.position and plan.position != cur:
+            targets.append(plan.position)
+        targets.append(state.gate_node)  # 宫门验核 6->3 帧，稳赚
+
+        for t in targets:
+            if self.planner._has_our_scout_mark(state, t):
+                continue
+            if state.round - self._scout_sent.get(t, -999) < self.SCOUT_RESEND_GAP:
+                continue
+            self._scout_sent[t] = state.round
+            return P.a_squad_scout(t)
+        return None
+
+    # ---------- 窗口 ----------
+
+    def _priority_contest(self, state, contests, plan):
+        """多窗口同帧只能出一张牌：优先出在我们志在必得的对象上。"""
+        def key(c):
+            if plan.kind == "task" and c.get("taskId") == (plan.task or {}).get("taskId"):
+                return 0
+            if c.get("contestType") == P.CONTEST_GATE:
+                return 1
+            return 2
+        return min(contests, key=key)
+
+    def pick_card(self, state, contest):
+        me = state.me
+        ctype = contest.get("contestType")
+        # 免费强行：有移动增益时零成本
+        if state.has_move_buff():
+            return P.CARD_QIANG_XING
+        # 我们主动争的对象：护卫行动点没有其他用途，该花就花
+        if ctype in (P.CONTEST_TASK, P.CONTEST_GATE, P.CONTEST_RESOURCE,
+                     P.CONTEST_DOCK, P.CONTEST_OBSTACLE):
+            if (me.get("guardActionPoint") or 0) > 0:
+                return P.CARD_BING_ZHENG
+            res = me.get("resources") or {}
+            if res.get(P.PASS_TOKEN, 0) + res.get(P.OFFICIAL_PERMIT, 0) > 0:
+                return P.CARD_YAN_DIE
         return P.CARD_ABSTAIN

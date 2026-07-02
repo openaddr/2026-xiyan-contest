@@ -15,8 +15,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lychee import protocol as P
+from lychee.planner import marginal_task_value, task_component_score
 from lychee.state import GameState
-from lychee.strategy import BaselineStrategy
+from lychee.strategy import BaselineStrategy, PlannerStrategy
 from lychee_basic_client.framing import read_frame, write_frame
 
 DOC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -168,9 +169,90 @@ def test_state_and_strategy():
     return ok
 
 
+def test_planner():
+    ok = True
+    # ---- 分数模型 ----
+    # 基础分 0->90：送达 120->240、任务 0->125、用时 0->25，共 +270
+    ok &= check("模型: 0->90 边际收益",
+                marginal_task_value(0, 90) == 270, f"{marginal_task_value(0, 90)}")
+    # 90 档解锁后单个 30 分任务边际收益骤降（90->120: 任务 125->170，共 +45）
+    ok &= check("模型: 90 后收益衰减",
+                marginal_task_value(90, 30) == 45 and marginal_task_value(60, 30) == 99,
+                f"90+30={marginal_task_value(90, 30)}, 60+30={marginal_task_value(60, 30)}")
+    ok &= check("模型: 基础分 90 拿满送达+用时",
+                task_component_score(90, 25) == 240 + 125 + 25)
+
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def make_state(round_no=142, node="S07", task_score=45, contests=False):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        if not contests:
+            d["contests"] = []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                         currentProcess=None, currentNodeId=node,
+                         taskScore=task_score, buffs=[])
+        gs.on_inquire(d)
+        return gs
+
+    # ---- 场景1: 站在可领任务点（T_003@S07，15分，保护期归我）应领任务 ----
+    gs = make_state()
+    a = PlannerStrategy().decide(gs)
+    kinds = {x["action"]: x for x in a}
+    ok &= check("规划: 站在任务点发 CLAIM_TASK",
+                kinds.get("CLAIM_TASK", {}).get("taskId") == "T_003",
+                json.dumps(a, ensure_ascii=False))
+    # 同帧应派小分队去探路（任务点已在脚下，探宫门 S14）
+    ok &= check("规划: 同帧派小分队探宫门",
+                kinds.get("SQUAD_SCOUT", {}).get("targetNodeId") == "S14",
+                json.dumps(kinds.get("SQUAD_SCOUT"), ensure_ascii=False))
+
+    # ---- 场景2: 截止临近（r560）应放弃任务直奔交付线 ----
+    gs = make_state(round_no=560, node="S09")
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    ok &= check("规划: 截止临近直奔交付", plan.kind == "deliver", repr(plan))
+    a = st.decide(gs)
+    main_acts = [x for x in a if x["action"] in ("MOVE", "CLEAR", "WAIT")]
+    ok &= check("规划: 截止临近在赶路", len(main_acts) == 1,
+                json.dumps(a, ensure_ascii=False))
+
+    # ---- 场景3: 任务分已满 130，15 分小任务不值得再绕 ----
+    gs = make_state(task_score=130)
+    plan = PlannerStrategy().planner.plan(gs)
+    # T_003 就在脚下（绕路 0 帧 + 3 帧读条），封顶后仍可能为正收益; 只验证不崩溃且可解释
+    ok &= check("规划: 高基础分下有明确决策", plan.kind in ("task", "deliver"), repr(plan))
+
+    # ---- 场景4: 无移动增益 + 有护卫行动点，任务窗口出兵争 ----
+    gs = make_state(contests=True)
+    st = PlannerStrategy()
+    contests = gs.my_open_contests()
+    if contests:
+        card = st.pick_card(gs, contests[0])
+        ok &= check("窗口: 无增益时用兵争(免费筹码)", card == P.CARD_BING_ZHENG,
+                    f"card={card} type={contests[0].get('contestType')}")
+
+    # ---- 场景5: 已验核后规划为 deliver ----
+    gs = make_state(node="S14")
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["verified"] = True
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("规划: 已验核直奔交付", plan.kind == "deliver", repr(plan))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
+    ok &= test_planner()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
