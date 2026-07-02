@@ -9,7 +9,7 @@ client/
 ├── start.sh              # 平台启动入口: ./start.sh <playerId> <host> <port>
 ├── main.py               # 入口：CLI 解析（兼容两种风格）+ 连接重试 + 启动会话
 ├── selftest.py           # 离线自测（framing + 状态解析 + 策略场景）
-├── package.sh            # 打包提交用 ZIP
+├── ../package.sh|.bat    # 打包提交用 ZIP（脚本在仓库根目录）
 ├── lychee_basic_client/  # 官方基础客户端（gitee openaddr/py-cli-26 原样引入，勿改）
 │   ├── framing.py        #   5位长度前缀分帧（半包/粘包处理）
 │   ├── messages.py       #   registration/ready/心跳 消息构造
@@ -45,10 +45,10 @@ python3 -m unittest discover -s tests
 ./start.sh 1001 127.0.0.1 30000                 # 平台位置参数（任务书 10.2）
 python3 main.py --host 127.0.0.1 --port 30000 --player-id 1001   # 官方命名参数
 
-# 打包提交（跨平台，核心逻辑在 package.py）
-./package.sh     # macOS / Linux
-package.bat      # Windows（双击或命令行）
-# 生成 dist/gameclient.zip：start.sh 在 ZIP 根目录，
+# 打包提交（脚本在仓库根目录，跨平台，核心逻辑在 ../package.py）
+../package.sh    # macOS / Linux
+..\package.bat   # Windows（双击或命令行）
+# 生成 仓库根/dist/gameclient.zip：start.sh 在 ZIP 根目录，
 # 自动强制 LF 换行 + 写入 0755 可执行位（Windows 原生压缩两者都会丢）
 ```
 

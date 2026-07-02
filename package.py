@@ -10,10 +10,11 @@ import os
 import sys
 import zipfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))   # 仓库根目录
+CLIENT = os.path.join(HERE, "client")               # 客户端源码目录
 OUT = os.path.join(HERE, "dist", "gameclient.zip")
 
-# (打包路径, 是否脚本[LF+755])
+# (打包路径[zip内相对根目录], 是否脚本[LF+755])
 INCLUDE_FILES = [
     ("start.sh", True),
     ("main.py", False),
@@ -26,7 +27,7 @@ NORM_ATTR = 0o644 << 16
 
 
 def add_file(zf, rel_path, is_script):
-    src = os.path.join(HERE, rel_path)
+    src = os.path.join(CLIENT, rel_path)
     with open(src, "rb") as f:
         data = f.read()
     if is_script:
@@ -47,12 +48,12 @@ def main():
         for rel, is_script in INCLUDE_FILES:
             add_file(zf, rel, is_script)
         for d in INCLUDE_DIRS:
-            for root, dirs, files in os.walk(os.path.join(HERE, d)):
+            for root, dirs, files in os.walk(os.path.join(CLIENT, d)):
                 dirs[:] = [x for x in dirs if x != "__pycache__"]
                 for fn in sorted(files):
                     if fn.endswith(".pyc"):
                         continue
-                    rel = os.path.relpath(os.path.join(root, fn), HERE)
+                    rel = os.path.relpath(os.path.join(root, fn), CLIENT)
                     add_file(zf, rel, fn.endswith(".sh"))
 
     # 自检：start.sh 在根目录、LF、可执行位；并打印构建版本防止打旧包
