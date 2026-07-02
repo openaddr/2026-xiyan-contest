@@ -506,11 +506,21 @@ class PlannerStrategy(BaselineStrategy):
         return n
 
     def _should_loiter(self, state, plan, cur):
-        """尾段蹲刷判定：预算内、余量足、里程碑未满、身处任务候选点。"""
+        """尾段蹲刷判定：预算内、余量足、里程碑未满、身处任务候选点。
+
+        跟随者战术（V3.10.1 修正）：仅当对手在前方（或已交付）才蹲——
+        领先时蹲刷等于把走廊节奏还给对手，对设卡型对手（2614）是自杀。
+        """
         if state.phase != P.PHASE_NORMAL or state.me.get("verified"):
             return False
         if plan.slack < self.LOITER_MIN_SLACK:
             return False
+        opp = state.opp
+        if opp and not opp.get("delivered") and not opp.get("retired"):
+            my_eta = state.graph.all_frames(cur).get(state.gate_node, 0)
+            opp_eta = self.planner._opp_eta(state, state.gate_node)
+            if my_eta < opp_eta:   # 我们领先：保节奏，不蹲
+                return False
         if (state.me.get("taskScore", 0) or 0) >= self.LOITER_BASE_CAP:
             return False
         if self._loiter_spent >= self.LOITER_BUDGET:

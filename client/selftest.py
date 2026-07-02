@@ -1470,7 +1470,9 @@ def test_tail_farm():
         inquire = json.load(f)["msg_data"]
 
     def gs_tail2(cur="S12", round_no=300, base=90):
-        """S12 是 T13/T14 候选点；无可做任务，对手在身后。"""
+        """S12 是 T13/T14 候选点；无可做任务，对手在前方（S13→S14）。
+
+        V3.10.1 跟随者闸门：蹲刷是跟随者战术，领先时不蹲。"""
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -1484,8 +1486,8 @@ def test_tail_farm():
                          resources={}, freshness=90.0, goodFruit=95,
                          badFruit=0, taskScore=base)
             else:
-                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
-                         routeEdgeId="E05", edgeTotalMs=55200, edgeProgressMs=9000,
+                p.update(state="MOVING", currentNodeId="S13", nextNodeId="S14",
+                         routeEdgeId="E09", edgeTotalMs=24840, edgeProgressMs=9000,
                          currentProcess=None, delivered=False, retired=False)
         for n in d["nodes"]:
             n["hasObstacle"] = False
@@ -1496,10 +1498,20 @@ def test_tail_farm():
         gs.on_inquire(d)
         return gs
 
-    # 1) 候选点 + 余量足 + 里程碑未满 → 蹲刷等待
+    # 1) 候选点 + 余量足 + 里程碑未满 + 对手在前方 → 蹲刷等待
     a = PlannerStrategy().main_action(gs_tail2())
     ok &= check("蹲刷: 候选点上等任务刷新",
                 a and a["action"] == "WAIT", str(a))
+
+    # 1b) 领先时不蹲（跟随者闸门）：对手在身后 → 保节奏推进
+    gs = gs_tail2()
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p.update(currentNodeId="S09", nextNodeId="S10", routeEdgeId="E05",
+                     edgeTotalMs=55200, edgeProgressMs=9000)
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("蹲刷: 领先时保节奏不蹲",
+                a and a["action"] == "MOVE", str(a))
 
     # 2) 任务基础分已到 110 → 不蹲，直接推进
     a = PlannerStrategy().main_action(gs_tail2(base=110))

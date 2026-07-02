@@ -5,4 +5,4 @@
 - 客户端启动横幅打印，回放分析时可确认线上跑的是哪一版
   （曾发生打包用了旧代码：r91 骑马 + 冻结零削弱 = 一眼识破旧版）。
 """
-BUILD_VERSION = "3.10-tail-farm"
+BUILD_VERSION = "3.11-follower-doctrine"
