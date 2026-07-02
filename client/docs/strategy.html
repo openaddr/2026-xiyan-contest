@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.3-freshrace)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.4-honest-eta)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.3-freshrace</span>
-   · 88 项自测覆盖 · 生成于 2026-07-02</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.4-honest-eta</span>
+   · 92 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -380,11 +380,12 @@
 <tr><td>3.0 activeguard</td><td>主动设卡：领先过咽喉回手防6卡</td><td>demo 四局全靠这招赢——刀递到我们手里</td></tr>
 <tr><td>3.1 corridor</td><td>走廊竞争：对手阴影惩罚 + 处理站帧数入 ETA + 天气感知寻路</td><td>根因分析：一切败局都是「落后 60~80 帧尾随同一走廊」的下游症状——阴影惩罚让寻路自动选无竞争走廊（水路），力争先过武关反手设卡</td></tr>
 <tr><td>3.2 icehunt</td><td>资源提货入规划：冰鉴(17分)/马匹与任务同台竞价，对手竞争折扣（先到×0.15/同至×0.55）</td><td>两场惜败（735:771 / 744:774）：水路竞速快 25 帧却零冰鉴——3 个冰鉴全在陆路，demo 双冰续到 91 鲜度 vs 我们自然衰减 75，鲜度分差 27~29 = 全部败分</td></tr>
-<tr><td><b>3.3 freshrace</b></td><td><b>鲜度竞赛：路线鲜度定价（山×1.16/水×0.96，天气耦合雨中水路反转）+ 拒止倍率×1.5 + 链式加成半权 + 竞速度量对称化</b></td><td>vs 2614 惜败 753:769：冰猎去 S06 山冰（独食面值高）却放走官道 S03+S07 买一送一——山路每帧多漏 0.02 鲜度没定价、抢对手碗里的冰是双向 35 分摇摆没定价、链头带链尾没定价</td></tr>
+<tr><td>3.3 freshrace</td><td><b>鲜度竞赛：路线鲜度定价（山×1.16/水×0.96，天气耦合雨中水路反转）+ 拒止倍率×1.5 + 链式加成半权 + 竞速度量对称化</b></td><td>vs 2614 惜败 753:769：冰猎去 S06 山冰（独食面值高）却放走官道 S03+S07 买一送一——山路每帧多漏 0.02 鲜度没定价、抢对手碗里的冰是双向 35 分摇摆没定价、链头带链尾没定价</td></tr>
+<tr><td><b>3.4 honest-eta</b></td><td><b>时间与价值双成本分离：交付截止 slack 只用真实时间（阻挡+处理站+天气税），鲜度定价/阴影只用于方案比较；对手走廊预测改为合理路径并集（≤最优×1.25）</b></td><td>真实地图回放取证：价值定价混入 ETA 后开局估 542 帧（实际 454），slack=-26 第 2 帧进抢救模式——V3.2/3.3 的资源与任务估值被整体熔断，从未真正执行；对手 Dijkstra 最优是水路但实际走官道，单路径拒止判定失灵</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.3-freshrace ·
-自测 <code>python3 selftest.py</code>（88 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.4-honest-eta ·
+自测 <code>python3 selftest.py</code>（92 项）</p>
 </div>
 
 <script>
