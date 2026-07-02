@@ -256,12 +256,16 @@ class PlannerStrategy(BaselineStrategy):
                 if state.phase != P.PHASE_RUSH and (me.get("squadAvailable") or 0) >= 2:
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
                 return None
-            # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）
+            # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）。
+            # 马匹经济：T06 类任务要消耗整匹马，留足预留量才骑（详见 planner）
             res = me.get("resources") or {}
             if not state.has_move_buff():
-                for horse in (P.FAST_HORSE, P.SHORT_HORSE):
-                    if res.get(horse, 0) > 0:
-                        return P.a_use_resource(horse)
+                reserve = self.planner.horses_reserved(state)
+                total = res.get(P.FAST_HORSE, 0) + res.get(P.SHORT_HORSE, 0)
+                if total > reserve:
+                    for horse in (P.FAST_HORSE, P.SHORT_HORSE):
+                        if res.get(horse, 0) > 0:
+                            return P.a_use_resource(horse)
             return None  # 让系统继续推进
 
         cur = me.get("currentNodeId")

@@ -22,6 +22,7 @@ class GameState:
         self.static_nodes = {}       # nodeId -> node
         self.resource_config = []    # 资源投放配置
         self.task_templates = {}     # templateId -> template
+        self.task_candidates = {}    # templateId -> 候选站点列表
         self.graph = None            # MapGraph
 
         # ---- 每帧 inquire ----
@@ -63,6 +64,8 @@ class GameState:
         self.task_templates = {
             t["taskTemplateId"]: t for t in d.get("taskTemplates") or []
         }
+        # 任务候选点（模板 ID -> 站点列表）：判断本图会刷哪些任务模板
+        self.task_candidates = game_play.get("taskCandidates") or {}
 
     def on_inquire(self, d):
         self.round = d["round"]

@@ -115,9 +115,12 @@ class TaskPlanner:
                   slack, speed, penalty):
         """返回 (净收益, 停靠节点)；不可行返回 None。"""
         # 资源前置：如 T06 启动时要消耗 1 匹马；缺前置资源跑过去只会被拒
-        # （requiredResourceTypes 语义为「任一满足」，如 快马/短程马 二选一）
+        # （requiredResourceTypes 语义为「任一满足」，如 快马/短程马 二选一）。
+        # start.taskTemplates 可能为空，T06 按任务书 5.2 硬规则兜底。
         tpl = state.task_templates.get(task.get("taskTemplateId")) or {}
         required = tpl.get("requiredResourceTypes") or []
+        if not required and task.get("taskTemplateId") == "T06":
+            required = [P.FAST_HORSE, P.SHORT_HORSE]
         if required:
             res = state.me.get("resources") or {}
             if not any(res.get(rt, 0) > 0 for rt in required):
@@ -182,10 +185,12 @@ class TaskPlanner:
 
     @staticmethod
     def _frame_value(state, eta_direct):
-        """一帧的机会成本：宫宴冲刺前到达宫门的富余时间几乎只值鲜度钱。"""
-        projected = state.round + eta_direct
-        if projected < RUSH_EARLIEST:
-            return FRESH_VALUE_PER_FRAME
+        """一帧的机会成本 = 鲜度损耗 + 用时分斜率。
+
+        用时分按交付帧计算，而绕路 1 帧交付就晚 1 帧 —— 无论现在离
+        宫宴冲刺多远，这 0.117 分/帧都是实打实的（平台三局我们交付
+        都在 537+，比对手晚 40~60 帧，鲜度+用时合计输 30 分）。
+        """
         return FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
 
     @staticmethod
@@ -226,6 +231,42 @@ class TaskPlanner:
     def _opp_processing_task(state, task):
         proc = state.opp.get("currentProcess") or {}
         return proc.get("taskId") == task.get("taskId")
+
+    # ================= 马匹预留 =================
+
+    def horses_reserved(self, state):
+        """需要为「消耗马匹类任务」(T06 争马换乘) 保留的马匹数。
+
+        平台实测教训：r91 骑掉唯一的短程马只省 ~2 帧（≈0.5 分），r300
+        站在 S09 面对刷出来的 T06 却做不了（RESOURCE_NOT_ENOUGH ×12），
+        S09/S04 两个 T06 全过期，任务分卡在 60。
+        T06 实例是中途刷新的，所以除了看当前任务列表，还要看地图配置
+        里有没有 T06 候选点（有就迟早会刷）。
+        """
+        if state.phase == P.PHASE_RUSH:
+            return 0  # 冲刺阶段任务停刷，马全部用来赶路
+        base = state.me.get("taskScore", 0) or 0
+        if base >= 110:
+            return 0  # 里程碑拿满，边际收益剩 45/个，速度更值钱
+
+        def needs_horse(template_id):
+            if template_id == "T06":   # 任务书 5.2：T06 消耗快马/短程马，规则固定
+                return True
+            tpl = state.task_templates.get(template_id) or {}
+            return any(rt in (P.FAST_HORSE, P.SHORT_HORSE)
+                       for rt in tpl.get("requiredResourceTypes") or [])
+
+        # 当前任务列表里有可做的马匹任务
+        for t in state.claimable_tasks():
+            if self.blacklist.get(t["taskId"], 0) > state.round:
+                continue
+            if needs_horse(t.get("taskTemplateId")):
+                return 1
+        # 地图会刷马匹任务且比赛还早（实例随时可能出现）
+        if state.round < 350 and any(needs_horse(tid)
+                                     for tid in state.task_candidates):
+            return 1
+        return 0
 
     # ================= 反馈 =================
 
