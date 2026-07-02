@@ -164,22 +164,23 @@ class TaskPlanner:
 
     # ================= 资源提货估值 =================
 
-    def _resource_targets(self, state, cur, to_gate, slack, speed, penalty, ecost):
-        """有库存且值得专程去领的资源点: [(nodeId, resourceType, 净收益)]。
+    def _resource_ctx(self, state, cur):
+        """资源竞速上下文（按帧+锚点缓存）。
 
-        V3.3 估值 = 面值 × 竞争折扣 × 拒止倍率 + 链式加成 − 绕路成本：
-        - 拒止：资源在对手前进路线上，抢到 = 我 +17 且对手 -18（双向摇摆）
-        - 链式：目标点通往宫门路上的其他可领资源按半权计入
-          （败局教训：S06 山冰面值 17 干净，却放走了官道 S03+S07 买一送一）
+        返回 (race_discount(nodeId, our_raw_eta), stock_claimables(node),
+              opp_path, my_raw)；竞速统一用裸帧，双方同一度量。
         """
+        cache = getattr(self, "_res_ctx_cache", None)
+        if cache and cache[0] == (state.round, cur):
+            return cache[1]
+
         me_res = state.me.get("resources") or {}
         opp = state.opp
         opp_pos = (opp.get("nextNodeId") or opp.get("currentNodeId")) if opp else None
         opp_dist = state.graph.all_frames(opp_pos) if opp_pos and \
             not (opp.get("delivered") or opp.get("retired")) else {}
-        my_raw = state.graph.all_frames(cur)   # 竞速用裸帧：双方同一度量
+        my_raw = state.graph.all_frames(cur)
         opp_path = self._opp_path_nodes(state)
-        g = state.graph
 
         def race_discount(node_id, our_raw_eta):
             oe = opp_dist.get(node_id)
@@ -203,6 +204,49 @@ class TaskPlanner:
                 if stock.get(rtype, 0) > 0 and me_res.get(rtype, 0) < limit:
                     yield rtype, value
 
+        ctx = (race_discount, stock_claimables, opp_path, my_raw)
+        self._res_ctx_cache = ((state.round, cur), ctx)
+        return ctx
+
+    def _resource_bundle(self, state, pos, onward_path, cur):
+        """任务/资源计划的沿途资源捆绑价值 (加分, 附加帧数)。
+
+        任务点上的可领资源全额计入（就地领取只多花 2 帧读条）；
+        通往宫门沿途的按半权。replay21/22 教训：官道任务捆着双冰、
+        水路任务只捆一匹马，分开估值让 30 分的鲜度捆绑被单任务净值掩盖。
+        """
+        race_discount, stock_claimables, opp_path, my_raw = \
+            self._resource_ctx(state, cur)
+        bonus, frames = 0.0, 0
+        node = state.nodes.get(pos) or {}
+        for rtype, value in stock_claimables(node):
+            v = value * race_discount(pos, my_raw.get(pos, 0))
+            if pos in opp_path:
+                v *= DENIAL_FACTOR
+            bonus += v
+            frames += CLAIM_FRAMES
+        node_raw = state.graph.all_frames(pos) if onward_path else {}
+        for nb in set(onward_path or ()) - {pos}:
+            nb_node = state.nodes.get(nb) or {}
+            for rtype, value in stock_claimables(nb_node):
+                eta = my_raw.get(pos, 0) + frames + node_raw.get(nb, 0)
+                v = CHAIN_WEIGHT * value * race_discount(nb, eta)
+                if nb in opp_path:
+                    v *= DENIAL_FACTOR
+                bonus += v
+        return bonus, frames
+
+    def _resource_targets(self, state, cur, to_gate, slack, speed, penalty, ecost):
+        """有库存且值得专程去领的资源点: [(nodeId, resourceType, 净收益)]。
+
+        V3.3 估值 = 面值 × 竞争折扣 × 拒止倍率 + 链式加成 − 绕路成本：
+        - 拒止：资源在对手前进路线上，抢到 = 我 +17 且对手 -18（双向摇摆）
+        - 链式：目标点通往宫门路上的其他可领资源按半权计入
+          （败局教训：S06 山冰面值 17 干净，却放走了官道 S03+S07 买一送一）
+        """
+        race_discount, stock_claimables, opp_path, my_raw = \
+            self._resource_ctx(state, cur)
+        g = state.graph
         out = []
         for node_id, node in state.nodes.items():
             for rtype, value in stock_claimables(node):
@@ -285,8 +329,15 @@ class TaskPlanner:
         if opp_eta < f_to:
             value *= CONTEST_RISK_DISCOUNT
 
-        cost = total_frames * self._frame_value(state, eta_direct)
-        net = value - cost
+        # 资源捆绑（V3.6）：任务点及其通往宫门沿途的可领资源计入任务估值。
+        # replay21/22 教训：T01@S03 捆着官道双冰、T08@S04 只捆一匹马，
+        # 单任务净值 argmax 把 30+ 分的鲜度捆绑包挤出局。
+        bundle, bframes = self._resource_bundle(state, pos, back_path, cur)
+        if total_frames + bframes > slack:
+            bundle, bframes = 0.0, 0  # 余量装不下捆绑就只按裸任务估
+
+        cost = (total_frames + bframes) * self._frame_value(state, eta_direct)
+        net = value + bundle - cost
         return (net, pos) if net > 0 else None
 
     def _position_for(self, state, task, cur, speed, penalty, ecost=None):

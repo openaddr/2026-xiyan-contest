@@ -1209,6 +1209,72 @@ def test_trap_proof():
     return ok
 
 
+def test_bundle():
+    """V3.6 回归（replay21/22：等分任务二选一时，无视沿途双冰选了水路）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_fork(ice_nodes=("S03", "S07")):
+        """replay21 开局重演：T01@S03(官道) 与 T08@S04(水路) 同为 30 分。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 2
+        d["contests"] = []
+        d["weather"] = {"active": [], "forecast": []}
+        d["tasks"] = [
+            {"taskId": "T_001", "taskTemplateId": "T01", "nodeId": "S03",
+             "processRound": 3, "score": 30, "expireRound": 221,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "protectionPlayerId": 0},
+            {"taskId": "T_002", "taskTemplateId": "T08", "nodeId": "S04",
+             "processRound": 4, "score": 30, "expireRound": 221,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "protectionPlayerId": 0},
+        ]
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S01", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=100.0, goodFruit=100,
+                         badFruit=0, taskScore=0)
+            else:
+                p.update(state="IDLE", currentNodeId="S01", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = ({"ICE_BOX": 1} if n["nodeId"] in ice_nodes else {})
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 官道任务捆双冰 vs 水路裸任务 → 选官道 T_001@S03
+    plan = PlannerStrategy().planner.plan(gs_fork())
+    ok &= check("捆绑: 等分任务选带双冰的官道",
+                plan.kind == "task" and plan.position == "S03"
+                and plan.task["taskId"] == "T_001", repr(plan))
+
+    # 2) 没有冰时退回纯净值比较（不误偏官道）
+    plan = PlannerStrategy().planner.plan(gs_fork(ice_nodes=()))
+    ok &= check("捆绑: 无资源时按裸净值决策",
+                plan.kind == "task", repr(plan))
+
+    # 3) 冰已持满（2个）→ 捆绑不再加分，回到裸净值
+    gs = gs_fork()
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["resources"] = {"ICE_BOX": 2}
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("捆绑: 持满冰不重复计价", plan.kind == "task", repr(plan))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1225,6 +1291,7 @@ def main():
     ok &= test_fresh_race()
     ok &= test_honest_eta()
     ok &= test_trap_proof()
+    ok &= test_bundle()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

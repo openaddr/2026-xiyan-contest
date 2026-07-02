@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.5-trap-proof)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.6-bundle)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.5-trap-proof</span>
-   · 99 项自测覆盖 · 生成于 2026-07-02</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.6-bundle</span>
+   · 102 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -382,11 +382,12 @@
 <tr><td>3.2 icehunt</td><td>资源提货入规划：冰鉴(17分)/马匹与任务同台竞价，对手竞争折扣（先到×0.15/同至×0.55）</td><td>两场惜败（735:771 / 744:774）：水路竞速快 25 帧却零冰鉴——3 个冰鉴全在陆路，demo 双冰续到 91 鲜度 vs 我们自然衰减 75，鲜度分差 27~29 = 全部败分</td></tr>
 <tr><td>3.3 freshrace</td><td><b>鲜度竞赛：路线鲜度定价（山×1.16/水×0.96，天气耦合雨中水路反转）+ 拒止倍率×1.5 + 链式加成半权 + 竞速度量对称化</b></td><td>vs 2614 惜败 753:769：冰猎去 S06 山冰（独食面值高）却放走官道 S03+S07 买一送一——山路每帧多漏 0.02 鲜度没定价、抢对手碗里的冰是双向 35 分摇摆没定价、链头带链尾没定价</td></tr>
 <tr><td>3.4 honest-eta</td><td><b>时间与价值双成本分离：交付截止 slack 只用真实时间（阻挡+处理站+天气税），鲜度定价/阴影只用于方案比较；对手走廊预测改为合理路径并集（≤最优×1.25）</b></td><td>真实地图回放取证：价值定价混入 ETA 后开局估 542 帧（实际 454），slack=-26 第 2 帧进抢救模式——V3.2/3.3 的资源与任务估值被整体熔断，从未真正执行；对手 Dijkstra 最优是水路但实际走官道，单路径拒止判定失灵</td></tr>
-<tr><td><b>3.5 trap-proof</b></td><td><b>防中边陷阱：对手占着/将先到我们下一跳时不上边（等它离开，留卡则节点攻坚瞬拆）；对峙上限 30 帧防赖；无截止赌博例外（slack 越紧冻结越致命）</b></td><td>replay20 惨案 60:754 未交付：2614 连环中边掐卡——S10 陷阱花 6 人手削弱解冻，S11 二连掐时人手仅剩 1，冻至终场。设卡必须站在节点上（规则 6.2.1），它离开即永久安全，等待 10~30 帧远比冻结 180+ 帧便宜</td></tr>
+<tr><td>3.5 trap-proof</td><td><b>防中边陷阱：对手占着/将先到我们下一跳时不上边（等它离开，留卡则节点攻坚瞬拆）；对峙上限 30 帧防赖；无截止赌博例外（slack 越紧冻结越致命）</b></td><td>replay20 惨案 60:754 未交付：2614 连环中边掐卡——S10 陷阱花 6 人手削弱解冻，S11 二连掐时人手仅剩 1，冻至终场。设卡必须站在节点上（规则 6.2.1），它离开即永久安全，等待 10~30 帧远比冻结 180+ 帧便宜</td></tr>
+<tr><td><b>3.6 bundle</b></td><td><b>捆绑估值：任务点及沿途可领资源计入任务净值（点上全额+2帧、沿途半权，含竞速折扣与拒止）</b></td><td>replay21/22（741:774 / 742:775）：r2 任务二选一 T01@S03(官道,捆双冰) vs T08@S04(水路,捆一马)，单任务 argmax 选了水路——官道双冰第 6 次白送，鲜度 74 vs 91 又输 30 分。真实地图验证：r2 计划翻转为 T_001@S03 (net 54)</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.5-trap-proof ·
-自测 <code>python3 selftest.py</code>（99 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.6-bundle ·
+自测 <code>python3 selftest.py</code>（102 项）</p>
 </div>
 
 <script>
