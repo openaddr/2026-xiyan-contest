@@ -1054,6 +1054,72 @@ def test_fresh_race():
     return ok
 
 
+def test_honest_eta():
+    """V3.4 回归：交付截止用真实时间，价值定价不得吓熔断规划器。
+
+    真实地图实测：鲜度因子+阴影混进 ETA 后开局估 542 帧（实际 454），
+    slack=-26 → 第 2 帧进抢救模式，任务/资源全部熔断。
+    """
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    gs = GameState(1001)
+    gs.on_start(start)
+    d = json.loads(json.dumps(inquire))
+    d["round"] = 2
+    d["contests"], d["tasks"] = [], []
+    d["weather"] = {"active": [], "forecast": []}
+    for p in d["players"]:
+        p.update(state="IDLE", currentNodeId="S01", nextNodeId=None,
+                 routeEdgeId=None, currentProcess=None, buffs=[],
+                 delivered=False, retired=False)
+        if p["playerId"] == 1001:
+            p.update(resources={}, freshness=100.0, goodFruit=100,
+                     badFruit=0, taskScore=0)
+    gs.on_inquire(d)  # 保留样例中的障碍/处理站，模拟真实开局
+
+    st = PlannerStrategy()
+    pl = st.planner
+    # 1) 时间成本 < 价值成本（山路边上鲜度因子只进价值侧）
+    e15 = gs.graph.edges["E15"]  # S01-S06 MOUNTAIN
+    tc = pl._time_edge_cost_fn(gs)(e15, 100)
+    vc = pl._edge_cost_fn(gs)(e15, 100)
+    ok &= check("诚实ETA: 山路鲜度因子只进价值侧", tc == 100 and vc > 110,
+                f"time={tc} value={vc:.1f}")
+
+    # 2) slack 按时间成本计（正值），且规划器不熔断
+    from lychee.planner import (GATE_VERIFY_FRAMES, DELIVER_FRAMES, SAFETY_MARGIN)
+    tg_t = gs.graph.shortest_path("S01", "S14", 1000,
+                                  pl._time_penalty_fn(gs),
+                                  pl._time_edge_cost_fn(gs))[0]
+    g2t = gs.graph.shortest_path("S14", "S15", 1000)[0]
+    expect = 600 - (2 + tg_t + GATE_VERIFY_FRAMES + g2t + DELIVER_FRAMES
+                    + SAFETY_MARGIN)
+    plan = pl.plan(gs)
+    ok &= check("诚实ETA: slack=时间口径且为正",
+                abs(plan.slack - expect) < 1e-6 and plan.slack > 0,
+                f"slack={plan.slack:.0f} expect={expect:.0f}")
+    ok &= check("诚实ETA: 开局不进抢救模式", "deadline" not in plan.detail,
+                repr(plan))
+
+    # 3) 对手合理走廊并集：在 S02 时官道 S03 与水路 S04 都在预测集内
+    gs2 = GameState(1001)
+    gs2.on_start(start)
+    d2 = json.loads(json.dumps(d))
+    for p in d2["players"]:
+        if p["playerId"] != 1001:
+            p["currentNodeId"] = "S02"
+    gs2.on_inquire(d2)
+    opp_path = PlannerStrategy().planner._opp_path_nodes(gs2)
+    ok &= check("走廊预测: 官道水路双覆盖",
+                "S03" in opp_path and "S04" in opp_path,
+                f"{sorted(opp_path)}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1068,6 +1134,7 @@ def main():
     ok &= test_corridor()
     ok &= test_ice_hunt()
     ok &= test_fresh_race()
+    ok &= test_honest_eta()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

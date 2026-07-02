@@ -124,9 +124,14 @@ class TaskPlanner:
         speed = state.my_speed()
         g = state.graph
 
+        # 交付截止用真实时间成本；方案比较用价值成本（鲜度/阴影定价）。
+        # 混用会自己吓自己：真实地图开局曾估出 slack=-26 直接熔断所有目标。
+        to_gate_t, _ = g.shortest_path(cur, state.gate_node, speed,
+                                       self._time_penalty_fn(state),
+                                       self._time_edge_cost_fn(state))
         to_gate, _ = g.shortest_path(cur, state.gate_node, speed, penalty, ecost)
         gate_to_term, _ = g.shortest_path(state.gate_node, state.terminal_node, speed)
-        eta_direct = to_gate + GATE_VERIFY_FRAMES + gate_to_term + DELIVER_FRAMES
+        eta_direct = to_gate_t + GATE_VERIFY_FRAMES + gate_to_term + DELIVER_FRAMES
         slack = state.duration_round - (state.round + eta_direct + SAFETY_MARGIN)
 
         # 已验核后离开宫门需要重新验核（6 帧），V1 不再接任务，直奔交付
@@ -324,12 +329,13 @@ class TaskPlanner:
             return me.get("nextNodeId") or me.get("currentNodeId")
         return me.get("currentNodeId")
 
-    def _penalty_fn(self, state):
-        """节点附加帧数 = 阻挡代价 + 固定处理站读条 + 对手阴影。
+    def _time_penalty_fn(self, state):
+        """真实时间惩罚：阻挡处理代价 + 固定处理站读条。
 
-        寻路、ETA、任务估值共用同一套，保证「估的路就是走的路」。
+        只含真的会花掉的帧数，用于交付截止 slack —— 不能混入价值定价！
+        （V3.4 教训：鲜度因子+阴影混进 ETA 后，真实地图开局估 542 帧、
+        slack=-26，第 2 帧就进抢救模式，资源/任务全部熔断。）
         """
-        shadow = self._shadow_nodes(state)
         gate, term = state.gate_node, state.terminal_node
 
         def penalty(nid):
@@ -345,7 +351,18 @@ class TaskPlanner:
                 proc_type = node.get("processType")
                 if proc_type and proc_type != "VERIFY":
                     p += node.get("processRound", 0) or 0
+            return p
+        return penalty
+
+    def _penalty_fn(self, state):
+        """价值惩罚 = 真实时间 + 对手阴影（用于方案比较/寻路选边）。"""
+        shadow = self._shadow_nodes(state)
+        time_penalty = self._time_penalty_fn(state)
+
+        def penalty(nid):
+            p = time_penalty(nid)
             if nid in shadow:
+                node = state.node(nid)
                 p += (SHADOW_CHOKE_PENALTY
                       if node.get("nodeType") in CHOKE_TYPES
                       else SHADOW_NODE_PENALTY)
@@ -376,41 +393,40 @@ class TaskPlanner:
         return self._shadow_cache[1]
 
     def _opp_path_nodes(self, state):
-        """对手去宫门的前进路线节点集（不含其脚下，按帧缓存）。"""
+        """对手去宫门的「合理走廊」节点并集（按帧缓存）。
+
+        对手不一定走它的最短路（实测 demo 的 Dijkstra 最优是水路、实际走
+        官道），单一路径预测会让拒止判定系统性失灵。取其所有总长不超过
+        最优 ×1.25 的首跳分支路径的并集，作为它可能经过的节点集。
+        """
         if self._opp_path_cache[0] == state.round:
             return self._opp_path_cache[1]
         nodes = set()
         opp = state.opp
-        if opp and not opp.get("delivered") and not opp.get("retired") and state.graph:
+        g = state.graph
+        if opp and not opp.get("delivered") and not opp.get("retired") and g:
             opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
             if opp_pos:
-                _, path = state.graph.shortest_path(opp_pos, state.gate_node)
+                best, path = g.shortest_path(opp_pos, state.gate_node)
                 nodes = set(path)  # 含其脚下/正在前往的点（到站就会顺手领）
+                if best < math.inf:
+                    for nb, e in g.neighbors(opp_pos):
+                        f_nb = g.edge_frames(e)
+                        d, p2 = g.shortest_path(nb, state.gate_node)
+                        if p2 and f_nb + d <= best * 1.25:
+                            nodes.update(p2)
+                            nodes.add(nb)
         self._opp_path_cache = (state.round, frozenset(nodes))
         return self._opp_path_cache[1]
 
-    def _edge_cost_fn(self, state):
-        """天气感知的边成本：暴雨命中水路 / 山雾命中山路时移动变慢。
-
-        生效中的天气全额计；已预告、且在近期时间窗内开始的按半额计
-        （粗粒度：不精确模拟我们到达该边的时刻，方向正确即可）。
-        """
+    def _time_edge_cost_fn(self, state):
+        """真实时间边成本：只含天气移动税（生效全额，近期预告半额）。"""
         weather = state.weather or {}
         active = weather.get("active") or []
         forecast = weather.get("forecast") or []
 
-        active_types = {w.get("type") for w in active}
-
         def edge_cost(edge, base_frames):
             rt = edge.get("routeType")
-            # 路线鲜度定价（V3.3）：天气生效时区域鲜度加成一并计入
-            # （暴雨中的水路 0.045×1.3 > 0.05，"水路更保鲜"在雨中反转）
-            decay = P.ROUTE_FRESH_DECAY.get(rt, P.IDLE_FRESH_DECAY)
-            region = 1.0
-            for wt in active_types:
-                region = max(region, WEATHER_FRESH_REGION.get((wt, rt), 1.0))
-            scale = 1.5 if P.HOT in active_types else 1.0  # 酷暑全图等比放大
-            mult = 1.0 + (decay * region - P.IDLE_FRESH_DECAY) * scale * 1.8 / _FV
             wmult = 1.0
             for w in active:
                 tax = P.WEATHER_MOVE_TAX.get((w.get("type"), rt))
@@ -421,7 +437,27 @@ class TaskPlanner:
                 if tax and (w.get("startRound", 10 ** 9) - state.round) \
                         <= FORECAST_HORIZON:
                     wmult = max(wmult, 1.0 + (tax / 1000.0 - 1.0) * 0.5)
-            return base_frames * mult * wmult
+            return base_frames * wmult
+        return edge_cost
+
+    def _edge_cost_fn(self, state):
+        """价值边成本 = 时间成本 × 路线鲜度定价（用于方案比较/寻路选边）。
+
+        鲜度定价与天气耦合：暴雨中的水路 0.045×1.3 > 0.05，
+        "水路更保鲜"在雨中反转；酷暑全图等比放大差距。
+        """
+        time_cost = self._time_edge_cost_fn(state)
+        active_types = {w.get("type") for w in (state.weather or {}).get("active") or []}
+
+        def edge_cost(edge, base_frames):
+            rt = edge.get("routeType")
+            decay = P.ROUTE_FRESH_DECAY.get(rt, P.IDLE_FRESH_DECAY)
+            region = 1.0
+            for wt in active_types:
+                region = max(region, WEATHER_FRESH_REGION.get((wt, rt), 1.0))
+            scale = 1.5 if P.HOT in active_types else 1.0
+            mult = 1.0 + (decay * region - P.IDLE_FRESH_DECAY) * scale * 1.8 / _FV
+            return time_cost(edge, base_frames) * mult
         return edge_cost
 
     @staticmethod
