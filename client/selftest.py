@@ -732,6 +732,77 @@ def test_watchdog():
     return ok
 
 
+def test_active_guard():
+    """V3 主动设卡：领先过咽喉时回手设卡挡对手。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_at(cur="S10", opp_pos="S07", round_no=200, phase="NORMAL",
+              good=90, my_guards=(), node_guarded=False):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = round_no, phase
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=good,
+                         badFruit=0, taskScore=90)
+            else:
+                p.update(state="MOVING" if opp_pos else "IDLE",
+                         currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["resourceStock"] = {}
+            n["guard"] = None
+            if n["nodeId"] in my_guards:
+                n["guard"] = {"ownerTeamId": "RED", "defense": 4, "active": True}
+            if node_guarded and n["nodeId"] == cur:
+                n["guard"] = {"ownerTeamId": "BLUE", "defense": 4, "active": True}
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 我在 S10（关键关隘），对手在 S07 身后赶来 -> 设卡
+    a = PlannerStrategy().main_action(gs_at())
+    ok &= check("设卡: 领先过武关回手设卡",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10"
+                and a.get("extraGoodFruit", 0) == 2,
+                str(a))
+
+    # 2) 对手已过（在 S11，路线不再经过 S10）-> 不设
+    a = PlannerStrategy().main_action(gs_at(opp_pos="S11"))
+    ok &= check("设卡: 对手已过不白设",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    # 3) 已有 2 张有效卡 -> 不设（防顶掉旧卡）
+    a = PlannerStrategy().main_action(gs_at(my_guards=("S03", "S08")))
+    ok &= check("设卡: 已有2卡不再设",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    # 4) RUSH 阶段 -> 专心交付不设卡
+    a = PlannerStrategy().main_action(gs_at(round_no=460, phase="RUSH"))
+    ok &= check("设卡: RUSH 不设卡",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    # 5) 该节点已有卡（谁的都算）-> 不设
+    a = PlannerStrategy().main_action(gs_at(node_guarded=True))
+    ok &= check("设卡: 节点已有卡不重复",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    # 6) 好果紧张 -> 不做对抗投资
+    a = PlannerStrategy().main_action(gs_at(good=8))
+    ok &= check("设卡: 好果紧张不投资",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -742,6 +813,7 @@ def main():
     ok &= test_p0_audit()
     ok &= test_horse_economy()
     ok &= test_watchdog()
+    ok &= test_active_guard()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
