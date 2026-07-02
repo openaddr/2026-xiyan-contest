@@ -7,6 +7,7 @@
 """
 import json
 import os
+import random
 import socket
 import sys
 import threading
@@ -230,14 +231,17 @@ def test_planner():
     # T_003 就在脚下（绕路 0 帧 + 3 帧读条），封顶后仍可能为正收益; 只验证不崩溃且可解释
     ok &= check("规划: 高基础分下有明确决策", plan.kind in ("task", "deliver"), repr(plan))
 
-    # ---- 场景4: 无移动增益 + 有护卫行动点，任务窗口出兵争 ----
+    # ---- 场景4: 无移动增益时出牌应为可负担的有效牌（混合策略，非恒定） ----
     gs = make_state(contests=True)
     st = PlannerStrategy()
     contests = gs.my_open_contests()
     if contests:
-        card = st.pick_card(gs, contests[0])
-        ok &= check("窗口: 无增益时用兵争(免费筹码)", card == P.CARD_BING_ZHENG,
-                    f"card={card} type={contests[0].get('contestType')}")
+        random.seed(7)
+        cards = {st.pick_card(gs, contests[0]) for _ in range(30)}
+        ok &= check("窗口: 出牌均为可负担合法牌",
+                    cards <= {P.CARD_BING_ZHENG, P.CARD_XIAN_GONG,
+                              P.CARD_YAN_DIE, P.CARD_ABSTAIN} and len(cards) >= 2,
+                    f"cards={sorted(cards)}")
 
     # ---- 场景5: 已验核后规划为 deliver ----
     gs = make_state(node="S14")
@@ -249,10 +253,96 @@ def test_planner():
     return ok
 
 
+def test_contention():
+    """镜像死锁回归：错峰处理 / 混合出牌 / 移动中补显式 MOVE。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def mirror_state(my_id, round_no=44):
+        """双方同帧空闲停在 S02（固定处理站，前段交接）——镜像死锁现场。"""
+        gs = GameState(my_id)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"] = []
+        d["tasks"] = []
+        for p in d["players"]:
+            p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                     currentProcess=None, currentNodeId="S02", buffs=[],
+                     taskScore=0)
+        for n in d["nodes"]:
+            if n["nodeId"] == "S02":
+                n.update(processType="TRANSFER", processRound=4)
+        gs.on_inquire(d)
+        return gs
+
+    # ---- 错峰：同一帧，两边必然一个 PROCESS 一个 WAIT ----
+    for rnd in (44, 45):
+        acts = {}
+        for pid in (1001, 2002):
+            a = PlannerStrategy().main_action(mirror_state(pid, rnd))
+            acts[pid] = a["action"]
+        ok &= check(f"错峰: r{rnd} 双方不同帧启动处理",
+                    sorted(acts.values()) == ["PROCESS", "WAIT"],
+                    f"{acts}")
+
+    # ---- 对手读条中：排队等待，不重复提交 ----
+    gs = mirror_state(1001, 44)
+    opp = gs.players[2002]
+    opp.update(state="PROCESSING",
+               currentProcess={"action": "PROCESS", "type": "PROCESS",
+                               "targetNodeId": "S02", "remainRound": 3})
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("错峰: 对手读条中我方排队", a["action"] == "WAIT", str(a))
+
+    # ---- 混合出牌：镜像局面下出牌有随机性，不再恒定同一张 ----
+    random.seed(42)
+    gs = mirror_state(1001, 44)
+    contest = {"contestId": "C_X", "contestType": "DOCK",
+               "redPlayerId": 1001, "bluePlayerId": 2002}
+    st = PlannerStrategy()
+    picks = [st.pick_card(gs, contest) for _ in range(60)]
+    distinct = set(picks)
+    ok &= check("出牌: 混合策略出现多种牌", len(distinct) >= 2, f"{sorted(distinct)}")
+    ok &= check("出牌: 弃权不占主导", picks.count(P.CARD_ABSTAIN) < 20,
+                f"abstain={picks.count(P.CARD_ABSTAIN)}/60")
+    ok &= check("出牌: 全部为合法牌",
+                distinct <= {P.CARD_YAN_DIE, P.CARD_QIANG_XING, P.CARD_XIAN_GONG,
+                             P.CARD_BING_ZHENG, P.CARD_ABSTAIN})
+
+    # ---- 移动中只有小分队动作时补显式 MOVE（防服务端暂停推进） ----
+    gs = GameState(1001)
+    gs.on_start(start)
+    d = json.loads(json.dumps(inquire))
+    d["contests"], d["tasks"] = [], []
+    for p in d["players"]:
+        if p["playerId"] == 1001:
+            p.update(state="MOVING", currentNodeId="S01", nextNodeId="S02",
+                     routeEdgeId="E01", currentProcess=None, buffs=[],
+                     resources={})
+    gs.on_inquire(d)
+    a = PlannerStrategy().decide(gs)
+    kinds = [x["action"] for x in a]
+    has_squad = "SQUAD_SCOUT" in kinds
+    has_main = any(k in P.MAIN_ACTION_TYPES for k in kinds)
+    ok &= check("移动中: 小分队动作伴随显式 MOVE 保持推进",
+                (not has_squad) or has_main, f"{kinds}")
+    if has_main:
+        mv = [x for x in a if x["action"] == "MOVE"]
+        ok &= check("移动中: MOVE 目标为当前目标节点",
+                    not mv or mv[0]["targetNodeId"] == "S02",
+                    json.dumps(a, ensure_ascii=False))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
     ok &= test_planner()
+    ok &= test_contention()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
