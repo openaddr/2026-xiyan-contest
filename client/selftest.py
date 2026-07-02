@@ -1163,33 +1163,59 @@ def test_trap_proof():
         gs.on_inquire(d)
         return gs
 
-    # 1) 对手正站在我们的下一跳 S11 → 不上边，等待
-    st = PlannerStrategy()
+    def armed(st):
+        """V3.9 证据门：对手设过卡后陷阱等待才生效。"""
+        st._opp_guards_seen = True
+        return st
+
+    # 0) 证据门（V3.9 replay27 回归）：对手从未设卡 → 不当埋伏者，直接推进
+    #    （曾把跑在前面的 2613 当威胁，3×30 帧罚站，任务被横扫 90:180）
+    a = PlannerStrategy().main_action(gs_tail())
+    ok &= check("防陷阱: 无设卡前科不罚站",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S11", str(a))
+
+    # 0b) 地形门：有前科但下一跳是普通驿站（非咽喉）→ 不等待
+    st = armed(PlannerStrategy())
+    gs = gs_tail()
+    for n in gs.nodes.values():
+        if n["nodeId"] == "S11":
+            n["nodeType"] = "STATION"
+    a = st.main_action(gs)
+    ok &= check("防陷阱: 普通驿站不设防",
+                a and a["action"] == "MOVE", str(a))
+
+    # 1) 有前科 + 对手正站在我们的下一跳（咽喉 S11）→ 不上边，等待
+    st = armed(PlannerStrategy())
     a = st.main_action(gs_tail())
     ok &= check("防陷阱: 对手占下一跳时等待",
                 a and a["action"] == "WAIT", str(a))
 
-    # 2) 对手在赶往 S11 且明显先到 → 同样等待
-    a = PlannerStrategy().main_action(
+    # 2) 有前科 + 对手在赶往 S11 且明显先到 → 同样等待
+    a = armed(PlannerStrategy()).main_action(
         gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07"))
     ok &= check("防陷阱: 对手先到下一跳时等待",
                 a and a["action"] == "WAIT", str(a))
 
     # 3) 对手已离开（在 S12 且驶向 S13）→ 正常上边
-    a = PlannerStrategy().main_action(
+    a = armed(PlannerStrategy()).main_action(
         gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08"))
     ok &= check("防陷阱: 对手离开后正常推进",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S11", str(a))
 
     # 4) 它留了卡 → 站在节点上攻坚拆（好果2×2+坏果2×3=10 ≥ 6）
-    a = PlannerStrategy().main_action(
+    a = armed(PlannerStrategy()).main_action(
         gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08", guard_def=6))
     ok &= check("防陷阱: 留卡则节点攻坚瞬拆",
                 a and a["action"] == "BREAK_GUARD" and a["targetNodeId"] == "S11",
                 str(a))
 
-    # 5) 对峙上限：连续等待 30 帧后硬闯，不陪它耗
+    # 4b) 证据自动侦测：节点上出现对手的有效卡 → 前科标记自动置位
     st = PlannerStrategy()
+    st.decide(gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08", guard_def=6))
+    ok &= check("防陷阱: 见卡自动记前科", st._opp_guards_seen, "")
+
+    # 5) 对峙上限：连续等待 30 帧后硬闯，不陪它耗
+    st = armed(PlannerStrategy())
     last = None
     for i in range(35):
         last = st.main_action(gs_tail(round_no=380 + i))
@@ -1197,7 +1223,7 @@ def test_trap_proof():
                 last and last["action"] == "MOVE", str(last))
 
     # 6) 截止吃紧也不赌：slack 越紧冻结越致命（等待 10~30 帧 vs 冻结 180+ 帧）
-    a = PlannerStrategy().main_action(gs_tail(round_no=545))
+    a = armed(PlannerStrategy()).main_action(gs_tail(round_no=545))
     ok &= check("防陷阱: 截止吃紧仍不上险边",
                 a and a["action"] == "WAIT", str(a))
 
@@ -1206,7 +1232,7 @@ def test_trap_proof():
     for p in gs.players.values():
         if p["playerId"] != 1001:
             p["delivered"] = True
-    a = PlannerStrategy().main_action(gs)
+    a = armed(PlannerStrategy()).main_action(gs)
     ok &= check("防陷阱: 对手已交付不误等",
                 a and a["action"] == "MOVE", str(a))
     return ok

@@ -198,6 +198,7 @@ class PlannerStrategy(BaselineStrategy):
         self._stall = (None, None, 0)    # (edgeId, progressMs, 连续停滞帧数)
         self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
+        self._opp_guards_seen = False    # 对手本局是否设过卡（陷阱风险的证据门）
 
     # ---------- 每帧入口 ----------
 
@@ -248,6 +249,21 @@ class PlannerStrategy(BaselineStrategy):
             self.planner.back_node = prev_station
             self.planner.back_until = state.round + 40
         self._weaken_target = None
+
+        # 对手设卡证据：事件流 或 任意节点上它的有效卡（陷阱等待的前提）
+        if not self._opp_guards_seen:
+            for e in state.events:
+                p = e.get("payload") or {}
+                if e.get("type") == "GUARD_SET" and p.get("playerId") == state.opp_id:
+                    self._opp_guards_seen = True
+                    break
+            else:
+                for node in state.nodes.values():
+                    g = node.get("guard")
+                    if g and g.get("ownerTeamId") \
+                            and g["ownerTeamId"] != state.my_team:
+                        self._opp_guards_seen = True
+                        break
 
         # 移动进度停滞检测：MOVING 且 (edge, progress) 连续 N 帧不变
         me = state.me
@@ -601,6 +617,15 @@ class PlannerStrategy(BaselineStrategy):
 
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
+            return give_up()
+        # 证据门（V3.9）：对手本局没设过卡就不当它是埋伏者 —— replay27 把
+        # 跑在前面的 2613（历史零设卡）当威胁，三次罚站共 90 帧，
+        # 官道任务被横扫（任务分 90:180）。首卡可能吃一次亏（约 36 帧
+        # 削弱解冻），远小于对非设卡者每局白送 90 帧。
+        if not self._opp_guards_seen:
+            return give_up()
+        # 地形门：实战陷阱只发生在咽喉类节点（S10/S11），普通驿站不设防
+        if state.node(nxt).get("nodeType") not in self.GUARD_NODE_TYPES:
             return give_up()
 
         opp_cur = opp.get("currentNodeId")
