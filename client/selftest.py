@@ -1868,9 +1868,64 @@ def main():
     ok &= test_reject_join()
     ok &= test_weaken_discipline()
     ok &= test_latent_mechanics()
+    ok &= test_tactical_layer()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
+
+
+def test_tactical_layer():
+    """port3: main V3.13 仍缺的 3 个战术方法（障碍 T04 优先 / PASS 必胜 / 固定站探路）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def st_at(node, *, squad=4, good=90, bad=0, **me_kw):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                         currentProcess=None, currentNodeId=node, buffs=[],
+                         goodFruit=good, badFruit=bad, squadAvailable=squad,
+                         freshness=95.0, resources={}, taskScore=90)
+                p.update(me_kw)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False; n["guard"] = None; n["scouted"] = []; n["resourceStock"] = {}
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 障碍上有 T04 -> CLAIM_TASK（+30 不花好果），而非 CLEAR
+    gs = st_at("S09", good=2)
+    gs.nodes["S10"]["hasObstacle"] = True
+    gs.nodes["S10"]["obstacleType"] = "MUD"
+    gs.tasks = [{"taskId": "T_04X", "taskTemplateId": "T04", "nodeId": "S10",
+                 "processRound": 6, "score": 30, "expireRound": 0,
+                 "active": True, "completed": False, "failed": False,
+                 "ownerPlayerId": 0, "protectionPlayerId": 0}]
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("战术: 障碍有 T04 优先 CLAIM_TASK",
+                a and a["action"] == "CLAIM_TASK" and a.get("taskId") == "T_04X", str(a))
+
+    # 2) PASS 窗口必胜：有兵争 -> 必出兵争（确定性，不弃权）
+    gs = st_at("S09", good=90, guardActionPoint=2)
+    contest = {"contestId": "C_P", "contestType": "PASS",
+               "redPlayerId": 1001, "bluePlayerId": 2002}
+    random.seed(3)
+    picks = {PlannerStrategy().pick_card(gs, contest) for _ in range(20)}
+    ok &= check("战术: PASS 必胜优先出兵争", picks == {"BING_ZHENG"}, str(picks))
+
+    # 3) 固定站探路：scout_targets 含路线前方 >=5 帧固定站
+    gs = st_at("S09", good=80)
+    plan = PlannerStrategy().planner.plan(gs)
+    fxd = [t for t in PlannerStrategy()._fixed_station_targets(gs, plan)]
+    ok &= check("战术: 固定站探路目标集非空",
+                len(fxd) >= 1, f"fixed={fxd}")
+    return ok
 
 
 if __name__ == "__main__":

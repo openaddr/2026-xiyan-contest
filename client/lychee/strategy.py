@@ -453,6 +453,10 @@ class PlannerStrategy(BaselineStrategy):
         if nxt is None:
             return self._idle_upgrade(state, plan)
         if state.has_obstacle(nxt) and not state.enemy_guard(nxt):
+            # 优先 T04（同 6 帧，+30 分且不花好果）；无 T04 才主车队清障
+            t04 = self._t04_for(state, nxt)
+            if t04:
+                return P.a_claim_task(t04["taskId"])
             if me.get("goodFruit", 0) > 1:
                 return P.a_clear(nxt)
             return P.a_wait()
@@ -683,6 +687,30 @@ class PlannerStrategy(BaselineStrategy):
                                     self.planner._penalty_fn(state),
                                     self.planner._edge_cost_fn(state))
 
+    # ---------- 障碍 T04 优先 / 固定站探路（战术层，main V3.13 仍缺） ----------
+
+    @staticmethod
+    def _t04_for(state, obstacle_node):
+        """目标障碍节点上可处理的 T04 清障任务（同 6 帧但 +30 分且不花好果，优于 CLEAR）。"""
+        for t in state.claimable_tasks():
+            if t.get("taskTemplateId") == "T04" and t.get("nodeId") == obstacle_node:
+                return t
+        return None
+
+    def _fixed_station_targets(self, state, plan):
+        """当前规划路线前方、读条 >=5 帧的固定处理站（登船/换运/入关/宫前交接等）。"""
+        me = state.me
+        target = (plan.position if plan.kind in ("task", "resource")
+                  else (state.terminal_node if me.get("verified") else state.gate_node))
+        _, path = state.my_route_to(target)
+        out = []
+        for nid in path:
+            n = state.node(nid)
+            pt = n.get("processType")
+            if pt and pt != "VERIFY" and (n.get("processRound") or 0) >= 5:
+                out.append(nid)
+        return out
+
     # ---------- 同帧争抢规避 ----------
 
     @staticmethod
@@ -806,6 +834,11 @@ class PlannerStrategy(BaselineStrategy):
             targets.append(state.gate_node)
         if plan.kind == "task" and plan.position and plan.position != cur and avail > 1:
             targets.append(plan.position)
+        # 固定处理站（登船 7/换运 6/入关 5/宫前 5 等大读条）：顺路探路 -3 帧/站
+        if avail > 1:
+            for nid in self._fixed_station_targets(state, plan):
+                if nid != cur and nid not in targets:
+                    targets.append(nid)
 
         penalty = self.planner._penalty_fn(state)
         speed = state.my_speed()
@@ -927,8 +960,21 @@ class PlannerStrategy(BaselineStrategy):
             return P.CARD_ABSTAIN
 
         # 低价值对象（顺手抢的资源）多混弃权省成本；关键对象少弃权
-        abstain_w = 1.5 if ctype == P.CONTEST_RESOURCE else 0.5
+        if ctype == P.CONTEST_RESOURCE:
+            abstain_w = 1.5
+        elif ctype == P.CONTEST_TASK:
+            abstain_w = 0.4    # 任务较关键，少弃权
+        else:
+            abstain_w = 0.5
         options.append((P.CARD_ABSTAIN, abstain_w))
+
+        # PASS / GATE：必胜优先，按克制覆盖面排序，绝不弃权
+        # （强通失败休整 3-8 帧再来 / 失验核权 —— 远大于一张牌的成本）
+        if ctype in (P.CONTEST_PASS, P.CONTEST_GATE):
+            for card in (P.CARD_BING_ZHENG, P.CARD_XIAN_GONG,
+                         P.CARD_QIANG_XING, P.CARD_YAN_DIE):
+                if any(c == card for c, _ in options):
+                    return card
 
         total = sum(w for _, w in options)
         pick = random.random() * total

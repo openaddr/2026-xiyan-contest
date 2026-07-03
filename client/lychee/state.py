@@ -5,6 +5,8 @@
 - 运行时 edges 优先用 inquire.edges[]，缺失回退 start.edges[]；
 - 动作结果结合 events[] + actionResults[] + 下一帧状态判断。
 """
+import math
+
 from . import protocol as P
 from .world import MapGraph
 
@@ -228,3 +230,20 @@ class GameState:
                 continue
             out.append(t)
         return out
+
+    # ---- 路线（战术层便捷访问） ----
+
+    def my_anchor_node(self):
+        """规划起点：停靠节点，或移动中的当前目标节点。"""
+        me = self.me
+        if me.get("routeEdgeId"):
+            return me.get("nextNodeId") or me.get("currentNodeId")
+        return me.get("currentNodeId")
+
+    def my_route_to(self, target, per_frame=None, node_penalty=None):
+        """本队锚点到 target 的最短路 (frames, [path])。"""
+        src = self.my_anchor_node()
+        if not src:
+            return math.inf, []
+        speed = per_frame if per_frame is not None else self.my_speed()
+        return self.graph.shortest_path(src, target, speed, node_penalty)
