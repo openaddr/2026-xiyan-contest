@@ -169,6 +169,10 @@ class PlannerStrategy(BaselineStrategy):
 
     MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
+    # 蹲点补卡的攻坚试探上限（V3.14）：每轮攻坚 ~2好果+1坏果 ≈ 4 分，对手
+    # 原地补卡 ≤3 好果；语料中蹲点者停留 ~30 帧 ≈ 2 个攻坚周期，2 次试探
+    # 覆盖"它正要离开"的情形，再多就是在给它的补卡循环送果
+    CAMPER_BREAK_LIMIT = 2
 
     # ---- 主动设卡（V3）----
     GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE"}  # 咽喉类节点
@@ -220,6 +224,7 @@ class PlannerStrategy(BaselineStrategy):
         self._scout_sent = {}   # nodeId -> 派出帧
         self._rush_tactic_tried = False  # 护果令只尝试一次，被拒也不无限重试
         self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
+        self._breaks_sent = {}  # nodeId -> 攻坚次数（识别蹲点补卡循环）
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
         self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
@@ -618,17 +623,33 @@ class PlannerStrategy(BaselineStrategy):
     # ---------- 突破敌方设卡 ----------
     # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
     # 优先级：攻坚(坏果优先,瞬发) > 小分队削弱后攻坚 > 强制通行(时间税<=50帧) > 等。
+    # 蹲点例外（V3.14）：卡主停靠在卡节点上时，它 ≤3 好果 4 帧就能原地补卡，
+    # 攻坚/削弱都是喂饵。给攻坚留 CAMPER_BREAK_LIMIT 次试探（对手可能随时离开，
+    # replay36 蹲点者 30 帧后就走了），超过即认定补卡循环，转强制通行——
+    # 时间税在窗口创建时一次锁定、之后补卡不计入、通行不可冻结（任务书 6.3.2），
+    # 是对蹲点补卡唯一有界的解。
 
     def _breakthrough(self, state, target, plan):
         me = state.me
         g = state.enemy_guard(target)
         defense = g.get("defense", 0) or 0
 
+        # 蹲点补卡循环已证实（我们拆过、卡又立起来、卡主还在）：停止喂饵
+        if self._opp_at_node(state, target) \
+                and self._breaks_sent.get(target, 0) >= self.CAMPER_BREAK_LIMIT:
+            if target != self._last_forced_node:
+                if self.log:
+                    self.log.info("camper at %s re-guarded after %d breaks, "
+                                  "forced pass", target, self._breaks_sent[target])
+                return P.a_forced_pass(target)
+            return P.a_wait()
+
         # 1) 一击必破：攻坚值 = 好果x2 + 坏果x3，投入各最多 2 篓，无读条
         invest = self._break_invest(defense, me.get("goodFruit", 0),
                                     me.get("badFruit", 0))
         if invest:
             gf, bf = invest
+            self._breaks_sent[target] = self._breaks_sent.get(target, 0) + 1
             if self.log:
                 self.log.info("break guard %s def=%d with good=%d bad=%d",
                               target, defense, gf, bf)
@@ -646,8 +667,11 @@ class PlannerStrategy(BaselineStrategy):
             forced_tax = min(32, 12 + defense * 5)
         else:
             forced_tax = min(40, 10 + defense * 5)
+        # 卡主在场不削（与中边冻结分支同一纪律）：削弱落地 3~8 帧，
+        # 它站在节点上随手就把防守值补回来，人手换零钱
         can_weaken = state.phase != P.PHASE_RUSH \
-            and self._squad_avail(state) >= dispatches * 2
+            and self._squad_avail(state) >= dispatches * 2 \
+            and not self._opp_at_node(state, target)
         # 悬赏本该是"强通不清卡拿不到悬赏分，该多容忍削弱几帧"的理由，但穷举
         # 现有防守值上限（4/5/6/7）发现削弱耗时按 WEAKEN_RESEND_GAP=12 帧计，
         # 在 can_weaken 成立的每种真实防守值下都已经跑赢强通税+10 的门槛——
@@ -749,8 +773,9 @@ class PlannerStrategy(BaselineStrategy):
 
         opp_cur = opp.get("currentNodeId")
         opp_next = opp.get("nextNodeId")
+        camped = not opp.get("routeEdgeId") and opp_cur == nxt
         risk = False
-        if not opp.get("routeEdgeId") and opp_cur == nxt:
+        if camped:
             risk = True        # 它正站在我们的下一跳上
         elif opp_next == nxt:
             # 它正赶往我们的下一跳：若它先到且来得及成卡（4帧），同样危险
@@ -761,11 +786,16 @@ class PlannerStrategy(BaselineStrategy):
 
         if not risk:
             return give_up()
-        # 防赖着不走的对峙：同一节点连续等待超过上限就硬闯
+        # 防赖着不走的对峙：同一节点连续等待超过上限就硬闯。
+        # 上限只适用于"正在赶来"的汇聚窗口（转瞬即逝，等它过去就安全）；
+        # 对手常驻在下一跳上时不硬闯（V3.14）——设卡读条只要 4 帧，比任何
+        # 边都短，我们一上边它随手起卡就是必冻（replay36：对峙后硬闯 71 帧
+        # 长边，r314 被掐点，冻 195 帧未交付）。站在节点上等，所有手段
+        # （攻坚/强通/改道/空转用情报）都还在；它要赢也必须动身去交付。
         node, n = self._trap_wait
         n = n + 1 if node == nxt else 1
         self._trap_wait = (nxt, n)
-        if n > self.TRAP_WAIT_MAX:
+        if n > self.TRAP_WAIT_MAX and not camped:
             if self.log:
                 self.log.info("trap standoff at %s exceeded %d frames, pushing",
                               nxt, self.TRAP_WAIT_MAX)
@@ -903,6 +933,15 @@ class PlannerStrategy(BaselineStrategy):
             return 2
         return min(contests, key=key)
 
+    @staticmethod
+    def _contest_points(state, contest):
+        """(我方拍分, 对方拍分)；无法辨认颜色时返回 (0, 0) 不触发锁定判断。"""
+        if contest.get("bluePlayerId") == state.player_id:
+            return contest.get("bluePoint", 0) or 0, contest.get("redPoint", 0) or 0
+        if contest.get("redPlayerId") == state.player_id:
+            return contest.get("redPoint", 0) or 0, contest.get("bluePoint", 0) or 0
+        return 0, 0
+
     def pick_card(self, state, contest):
         """混合策略出牌：可负担的牌按强度加权随机。
 
@@ -913,6 +952,14 @@ class PlannerStrategy(BaselineStrategy):
         me = state.me
         res = me.get("resources") or {}
         ctype = contest.get("contestType")
+
+        # 拍分数学锁定即弃权（V3.14）：窗口共 3 个计分拍，先到 2 分胜负已定
+        # ——2:0 进第三拍时对手最多追到 1，出什么都不改结果（replay36：
+        # 对手三拍全弃权，我们 2:0 后第三张献贡纯白烧 1 好果）；0:2 同理，
+        # 认负省牌
+        mine, theirs = self._contest_points(state, contest)
+        if mine >= 2 or theirs >= 2:
+            return P.CARD_ABSTAIN
 
         options = []  # (牌, 权重)
         if state.has_move_buff():

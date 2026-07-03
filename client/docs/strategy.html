@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.13-convergence)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.14-camper-counters)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.13-convergence</span>
-   · 139 项自测覆盖 · 生成于 2026-07-03</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.14-camper-counters</span>
+   · 147 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -278,13 +278,19 @@
 <h2 id="break">5. 突破敌方设卡（四级梯队）</h2>
 <p class="sub">教训：曾在 S09 干等 S10 敌卡风化 175 帧直接未交付（80:525）。等待永远是最后的选项。</p>
 <div class="flow">
+  <div class="node act-crit">⓪ 蹲点补卡检查（V3.14）：卡主停靠在卡节点上且我们攻坚试探已达
+    CAMPER_BREAK_LIMIT(2) 次 → 补卡循环证实（它 ≤3 好果 4 帧原地补满，攻坚/削弱都是喂饵），
+    直接 <span class="ret">FORCED_PASS</span>——时间税在窗口创建时一次锁定、之后补卡不计入、
+    通行不可冻结（6.3.2），是对蹲点者唯一有界的解；强通被禁（上次强通到达点）则等它离开</div>
+  <div class="arrow">↓ 非蹲点 / 试探次数未用完</div>
   <div class="node act-main">① <span class="ret">BREAK_GUARD</span> 一击必破（无读条）：
     攻坚值 = 好果×2 + 坏果×3（各≤2篓）≥ 防守值。投入搜索最小成本：坏果优先（本身近乎废物），
-    好果保留 5 篓交付底仓</div>
+    好果保留 5 篓交付底仓。每次攻坚计入该节点试探次数（供 ⓪ 识别补卡循环）</div>
   <div class="arrow">↓ 果品不够破</div>
-  <div class="node act-squad">② 小分队削弱（slack&gt;0 且非 RUSH 且人手≥2）：
+  <div class="node act-squad">② 小分队削弱（slack&gt;0 且非 RUSH 且人手≥2 且<b>卡主不在场</b>——V3.14
+    与中边冻结分支同一纪律）：
     <span class="ret">SQUAD_WEAKEN</span> 每次防守 −2（重发间隔 12 帧），主车队原地 WAIT，削到能破转 ①</div>
-  <div class="arrow">↓ 人手不足 / 截止吃紧</div>
+  <div class="arrow">↓ 人手不足 / 截止吃紧 / 卡主在场</div>
   <div class="node act-main">③ <span class="ret">FORCED_PASS</span> 强制通行兜底：
     时间税 min(50, 15+防守×5)（关键关隘），远好于等风化；守方胜出则休整后重试。
     规则限制：上次强通到达的节点不能重复强通</div>
@@ -336,7 +342,9 @@
 <!-- ================================================================ -->
 <h2 id="card">8. 窗口出牌博弈 pick_card()</h2>
 <p class="sub">确定性出牌遇同水平对手会陷入平局链（休整3帧+抑制18帧，镜像局曾因此双双 0 分）。
-采用加权随机混合策略，可负担的牌按强度加权：</p>
+采用加权随机混合策略，可负担的牌按强度加权。<b>拍分数学锁定即弃权（V3.14）</b>：
+三拍两胜，任一方先到 2 分后剩余拍出什么都不改结果——2:0 进第三拍弃权省牌
+（replay36：对手三拍全弃权，我们 2:0 后第三张献贡白烧 1 好果），0:2 认负省牌：</p>
 <table>
 <tr><th>牌</th><th>成本</th><th>克制</th><th>权重（可负担时）</th></tr>
 <tr><td>强行 QIANG_XING</td><td>有马类/疾行令增益时<b>免费</b>，否则耗 1 马</td><td>胜献贡</td><td>3.0（仅增益期入池）</td></tr>
@@ -378,6 +386,7 @@
 <tr><td>USE_ICE_BELOW 用冰阈值</td><td>鲜度 ≤ 90</td><td>+10 不溢出，且防跌破 90/80/… 好果转坏阈值</td></tr>
 <tr><td>CLAIM_LIMIT 领取上限</td><td>冰鉴 2 / 马各 1</td><td>冰鉴 +10鲜度 ≈ 18 分</td></tr>
 <tr><td>MIN_GOOD_RESERVE 好果底仓</td><td>5 篓</td><td>交付要求好果 &gt; 0，对抗投资不许掏空</td></tr>
+<tr><td>CAMPER_BREAK_LIMIT 蹲点攻坚试探上限（V3.14）</td><td>2 次</td><td>每轮攻坚 ~2好果+1坏果≈4分 vs 对手原地补卡 ≤3 好果；语料蹲点停留 ~30 帧 ≈ 2 个攻坚周期，覆盖"它正要走"，再多是给补卡循环送果，超限转强通（税锁定不可冻，6.3.2）</td></tr>
 <tr><td>攻坚成本权重</td><td>好果 1.9 / 坏果 0.1</td><td>好果值 1.8 分/篓 + 平分决胜价值；坏果近乎废物</td></tr>
 <tr><td>SCOUT_MAX_ETA / GATE_SCOUT_FROM</td><td>40 帧 / 第 355 帧</td><td>标记寿命 45 帧；宫门验核最早 ~390 开放（曾浪费 6/8 人手在过期标记上）</td></tr>
 <tr><td>SCOUT/WEAKEN 重发间隔</td><td>25 / 12 帧</td><td>在途落地延迟 3~15 帧，防重复派人；V3.12 起中边冻结分支同样受 12 帧间隔约束（曾 3 帧连发烧光 6 人手）</td></tr>
@@ -415,11 +424,34 @@
 <tr><td>3.11 follower-doctrine</td><td>蹲刷加跟随者闸门（领先时不蹲，保节奏防设卡者反超）；可行性硬约束改时间口径（价值帧膨胀曾把山冰线卡在 slack 外）；冰鉴 17→19（含阈值转坏保险）；任务竞争折扣加离路软化</td><td>vs 2614 输窗口后走水路鲜度输局：仿真证实水路+任务流是绝对分最优（山冰绕行诚实亏 14 分）——输起跑窗口后的正确画像是跟随者（蹲刷农任务），赢窗口时依旧双冰官道领跑；五图开局回归全部不变</td></tr>
 <tr><td>3.12 choke-discipline</td><td>①拒绝反馈 join 修复：平台 ACTION_REJECTED 载荷无 action 字段，任务拉黑分支上线以来从未命中——改用上帧实际提交的主动作补齐；死 T04（障碍已被非 T04 清除）加可行性过滤。②中边削弱纪律：卡主在场不削弱、12 帧重发间隔、保底 2 人手。③删陷阱证据门（保留地形门+几何门+对峙上限）；删中边非法改道看门狗（8.2 移动中不能改道）。④GUARD_SLACK_MIN 80→65 复活主动设卡死分支</td><td>replay36 惨案 80:734 全链取证：S08 站 28 帧逐帧重试死 T04（payload 缺 action 致拉黑失效）→ r295 带着几何+地形全中的风险上边（首卡无前科被证据门放行）→ r315-317 三帧连发削光防 6 → 2614 站 S10 原地 3 好果补卡 → 冻 195 帧零交付。replay20 同构（38 帧重试 + S10/S11 连环冻 180 帧）。V3.12 仿真反事实：r294 改为 WAIT 不上边、卡主离开后 12 帧间隔削弱 r358 解冻（快 167 帧）、replay27 误伤 87→30 帧</td></tr>
 <tr><td>3.12 latent-mechanics</td><td>策略体检发现六项零引用规则机制，逐条补上并各带一个"不该触发不触发"反例：
+①悬赏追分——落后时专程绕路攻敌方带悬赏的设卡（净值=rewardScore−绕路成本）；
+②情报（INTEL）——顺路领取 + 在排队/防陷阱/蹲刷等注定 WAIT 的空转帧顺手用掉；
+③过所/官凭——顺路领取，此前 YAN_DIE 出牌选项常年不在池子里；
+④终局急策三选一——坏果充足优先破关令绑验核，移动中截止吃紧优先疾行令；
+⑤小分队远程清障——非 T04 障碍远程清，严格排除自己在做的 T04 目标；
+⑥小分队续防——仅落后时续自家风化卡，领先时故意不续（防养大悬赏敞口）
+（合并时本行尾部曾被截断，V3.14 修复）</td><td>按任务书逐条对账代码引用面发现的规则数学空白：
+bounties[]/totalScore/SQUAD_REINFORCE/SQUAD_CLEAR/INTEL/PASS_TOKEN/OFFICIAL_PERMIT 全零引用；
+九局真图全量重放 + selftest 验证，S02 起跑窗口画像不受影响</td></tr>
 <tr><td><b>3.13 convergence</b></td><td><b>并行分支合流：3.12-choke-discipline（体检修复 P1~P4）+ 3.12-latent-mechanics（六项零引用机制）。合并解决点：中边冻结分支同时保留削弱纪律（卡主在场不削/12帧间隔/保底2人手）与空转帧机制；停滞看门狗改道按 8.2 确认非法后删除（latent 侧曾保留）；证据门删除对 latent 侧新增等待场景（排队/蹲刷的 _idle_upgrade）无交叉影响</b></td><td>合并后全量回归：selftest 全绿；replay36 关键帧（r294 WAIT / r331+ 间隔削弱）、replay27（误伤 30 帧）、replay31（无误设卡）真图复核不变；九图开局计划 T_001@S03 不变</td></tr>
+<tr><td><b>3.14 camper-counters</b></td><td><b>replay36 深度复盘落地三件：
+①蹲点补卡对策——卡主停靠卡节点时攻坚试探封顶 CAMPER_BREAK_LIMIT(2) 次，循环证实后转强制通行
+（税一次锁定/补卡不计入/通行不可冻结，6.3.2 规则可证）；_breakthrough 削弱层补"卡主在场不削"
+（此前只有中边冻结分支有该纪律）；
+②对峙上限限定汇聚窗口——对手常驻下一跳（蹲点）时永不硬闯（设卡读条 4 帧比任何边短，上边即必冻），
+"正在赶来"的转瞬窗口照旧 30 帧后硬闯；
+③窗口拍分数学锁定即弃权——三拍两胜先到 2 分定胜负，2:0 第三拍/0:2 出局拍一律弃权省牌。
+另：复盘 #1"节奏定价"经 r95 真图仿真证伪后降级为观察项——岔路口时我们已落后走廊 35 帧
+（S03 停留吃双任务的正确代价），官道任务被竞争折扣腰斩是对的（对手 r169 照片级抢到 T_004），
+诚实帧价的节奏罚金（12~25 分）翻不动 101:53 的净值差；强行翻需 4 倍常数=对着单局尸体校准，拒绝</b></td>
+<td>replay36 死亡五连环中 V3.13 未覆盖的两环：站在 S08 面对蹲点者时 V3.13 仍会陷入
+攻坚→补卡→攻坚的喂饵循环、对峙 30 帧后硬闯 71 帧长边（r314 掐点冻 195 帧）。
+selftest 147 项全绿（+8：蹲点四例/对峙两例/拍分锁定三例…）；九局回放播种后逐帧零差异
+（三个新分支在语料历史里均无既往触发点，行为由 selftest 锁定）</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.13-convergence ·
-自测 <code>python3 selftest.py</code>（139 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.14-camper-counters ·
+自测 <code>python3 selftest.py</code>（147 项）</p>
 </div>
 
 <script>

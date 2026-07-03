@@ -398,6 +398,23 @@ def test_contention():
                 distinct <= {P.CARD_YAN_DIE, P.CARD_QIANG_XING, P.CARD_XIAN_GONG,
                              P.CARD_BING_ZHENG, P.CARD_ABSTAIN})
 
+    # ---- 拍分数学锁定即弃权（V3.14）：三拍两胜，先到 2 分胜负已定 ----
+    # replay36 实锤：对手三拍全弃权，我们 2:0 后第三张献贡纯白烧 1 好果
+    st = PlannerStrategy()
+    locked_win = dict(contest, redPoint=2, bluePoint=0)   # 我(red) 2:0 进第三拍
+    picks = {st.pick_card(gs, locked_win) for _ in range(20)}
+    ok &= check("出牌: 2:0 锁定后第三拍弃权", picks == {P.CARD_ABSTAIN},
+                f"{sorted(picks)}")
+    locked_loss = dict(contest, redPoint=0, bluePoint=2)  # 0:2 已数学出局
+    picks = {st.pick_card(gs, locked_loss) for _ in range(20)}
+    ok &= check("出牌: 0:2 出局后认负省牌", picks == {P.CARD_ABSTAIN},
+                f"{sorted(picks)}")
+    live = dict(contest, redPoint=1, bluePoint=1)         # 1:1 决胜拍照常出牌
+    random.seed(3)
+    picks = {st.pick_card(gs, live) for _ in range(40)}
+    ok &= check("出牌: 1:1 决胜拍照常出牌",
+                any(c != P.CARD_ABSTAIN for c in picks), f"{sorted(picks)}")
+
     # ---- 移动中只有小分队动作时补显式 MOVE（防服务端暂停推进） ----
     # 场景: r360 在 E09 上移动、接近宫门 -> 触发探路，同包必须补 MOVE 保持推进
     gs = GameState(1001)
@@ -498,6 +515,51 @@ def test_breakthrough():
     a = st.decide(blocked_state(defense=6, bad=0, squad=0))
     ok &= check("突破: 重复强通被规避",
                 not any(x["action"] == "FORCED_PASS" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # ---- V3.14 蹲点补卡对策（replay36: 拆一次它 ≤3 好果原地补一次）----
+    def camped_state(**kw):
+        gs = blocked_state(**kw)
+        for p in gs.players.values():
+            if p["playerId"] != 1001:  # 卡主停靠在卡节点 S10 上
+                p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                         routeEdgeId=None, delivered=False, retired=False)
+        return gs
+
+    # 7) 卡主在场：攻坚试探不超过 CAMPER_BREAK_LIMIT 次，超限转强制通行
+    #    （强通税窗口创建时锁定、之后补卡不计入、通行不可冻结——6.3.2）
+    st = PlannerStrategy()
+    st._breaks_sent["S10"] = st.CAMPER_BREAK_LIMIT
+    a = st.decide(camped_state(defense=6, bad=2))
+    ok &= check("突破: 蹲点补卡循环证实后转强通",
+                any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
+                    for x in a)
+                and not any(x["action"] == "BREAK_GUARD" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 8) 卡主在场但还没试探过：仍允许攻坚（它可能随时离开，第一拆是便宜的信息）
+    st = PlannerStrategy()
+    a = st.decide(camped_state(defense=6, bad=2))
+    ok &= check("突破: 蹲点首拆仍试探（未证实循环前不放弃攻坚）",
+                any(x["action"] == "BREAK_GUARD" for x in a)
+                and st._breaks_sent.get("S10") == 1,
+                json.dumps(a, ensure_ascii=False))
+
+    # 9) 卡主在场且果品不够破：不派削弱喂饵（与中边冻结分支同一纪律），
+    #    直接强通兜底
+    a = PlannerStrategy().decide(camped_state(defense=6, bad=0, round_no=200))
+    ok &= check("突破: 卡主在场不削弱直接强通",
+                not any(x["action"] == "SQUAD_WEAKEN" for x in a)
+                and any(x["action"] == "FORCED_PASS" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 10) 蹲点+超限+强通被规则禁止（上次强通到达点）→ 老实等它离开
+    st = PlannerStrategy()
+    st._breaks_sent["S10"] = st.CAMPER_BREAK_LIMIT
+    st._last_forced_node = "S10"
+    a = st.decide(camped_state(defense=6, bad=2))
+    ok &= check("突破: 蹲点超限且强通被禁则等待",
+                not any(x["action"] in ("BREAK_GUARD", "FORCED_PASS") for x in a),
                 json.dumps(a, ensure_ascii=False))
     return ok
 
@@ -1220,12 +1282,23 @@ def test_trap_proof():
                 a and a["action"] == "BREAK_GUARD" and a["targetNodeId"] == "S11",
                 str(a))
 
-    # 5) 对峙上限：连续等待 30 帧后硬闯，不陪它耗
+    # 5) 对峙上限只适用于"正在赶来"的汇聚窗口（V3.14）：
+    # 5a) 对手常驻下一跳（蹲点）→ 永不硬闯。设卡读条 4 帧比任何边都短，
+    #     一上边它随手起卡就是必冻（replay36: 硬闯 71 帧长边冻 195 帧未交付）
     st = PlannerStrategy()
     last = None
     for i in range(35):
         last = st.main_action(gs_tail(round_no=380 + i))
-    ok &= check("防陷阱: 对峙超限后硬闯",
+    ok &= check("防陷阱: 蹲点者常驻下一跳永不硬闯",
+                last and last["action"] == "WAIT", str(last))
+
+    # 5b) 对手只是"正在赶来"（汇聚窗口转瞬即逝）→ 超限后照旧硬闯，不陪它耗
+    st = PlannerStrategy()
+    last = None
+    for i in range(35):
+        last = st.main_action(
+            gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07", round_no=380 + i))
+    ok &= check("防陷阱: 汇聚窗口对峙超限后硬闯",
                 last and last["action"] == "MOVE", str(last))
 
     # 6) 截止吃紧也不赌：slack 越紧冻结越致命（等待 10~30 帧 vs 冻结 180+ 帧）
