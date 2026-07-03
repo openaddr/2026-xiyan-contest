@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 dist/
 log/
+client/sweep_run.log
+client/sweep_results.json
