@@ -255,6 +255,7 @@ class PlannerStrategy(BaselineStrategy):
         self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
         self._rng = None                 # (matchId, playerId) 派生种子，回放可复现
+        self._opp_stationary = (None, 0)  # (对手停靠节点, 起始帧)——驻扎判定
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
         self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
         self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
@@ -316,6 +317,14 @@ class PlannerStrategy(BaselineStrategy):
         for node_id in list(self._guard_first_seen):
             if not state.enemy_guard(node_id):
                 del self._guard_first_seen[node_id]
+        # 对手驻扎追踪（V3.19）：停靠在同一节点的起始帧，供"坐地户免宽限"用
+        opp = state.opp
+        if opp and not opp.get("routeEdgeId") and opp.get("currentNodeId"):
+            if self._opp_stationary[0] != opp["currentNodeId"]:
+                self._opp_stationary = (opp["currentNodeId"], state.round)
+        else:
+            self._opp_stationary = (None, state.round)
+
         # 首见帧在吸收时全量记录（V3.18）：曾只在 _breakthrough 里 setdefault，
         # 走到卡前才起算宽限——存在已久的老卡（真蹲点）也被当"临别新卡"
         # 白等 8 帧。吸收时记录后，宽限只留给真正刚立的卡
@@ -734,7 +743,17 @@ class PlannerStrategy(BaselineStrategy):
     # 117 帧强通）。新卡+卡主在场 → 先等 CAMPER_GRACE 帧看它走不走：
     # 走了节点攻坚白菜价；赖着不走才是真蹲点，再走强通（多花 ≤8 帧）。
 
-    CAMPER_GRACE = 8
+    # V3.19：8 → 5。语料里临别卡对手全部在起卡后 1~4 帧离开（2614:
+    # r314卡→r318走 / r322卡→r323走；2839: r309→r310 / r450→r451），
+    # 5 = 观测上界 + 1 帧余量；竞技场 camper 局实测 8→5 把 3/24 的未交付
+    # 清零（3 帧提前量级联：早出武关 → 赶在对手到潼关起卡前上边，整段
+    # 45 帧汇聚等待消失），镜像局该参数不绑定（±30% margin 恰 0）无回归
+    CAMPER_GRACE = 5
+    # 驻扎判定（V3.19）：宽限的依据是"临别卡 = 刚到就起卡、次帧就走"。
+    # 起卡前已在该节点驻扎 ≥ 此帧数的对手是坐地户不是过客（竞技场 camper
+    # 局实测：3/24 局死于终盘差 ~20 帧，白给的 8 帧宽限是其中一截），
+    # 对它宽限只是给它多农 8 帧任务
+    CAMPER_ESTABLISHED = 20
 
     def _breakthrough(self, state, target, plan):
         me = state.me
@@ -751,7 +770,12 @@ class PlannerStrategy(BaselineStrategy):
                 if base else True
             if can_reguard:
                 first = self._guard_first_seen.setdefault(target, state.round)
-                if state.round - first < self.CAMPER_GRACE:
+                # 起卡前就驻扎已久的对手不给宽限：它不是读完临别卡要走的
+                # 过客，是坐地户——每帧宽限都是送它农任务
+                stay_node, stay_since = self._opp_stationary
+                established = (stay_node == target and
+                               first - stay_since >= self.CAMPER_ESTABLISHED)
+                if not established and state.round - first < self.CAMPER_GRACE:
                     return self._idle_upgrade(state, plan)  # 宽限：等它迈步
                 if forced_ok:
                     if self.log:

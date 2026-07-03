@@ -5,3 +5,5 @@ dist/
 log/
 client/sweep_run.log
 client/sweep_results.json
+client/sweep_camper.log
+client/sweep_camper.json

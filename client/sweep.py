@@ -39,16 +39,28 @@ PARAMS = [
 ]
 
 
+_OPP = None   # worker 进程内的陪练类名（"camper"/"rusher"/None=镜像）
+
+
+def _init_worker(opp):
+    global _OPP
+    _OPP = opp
+
+
 def _one(job):
     """job = (seed, patch_side, key, value)；返回变体视角的 (win, margin, 摘要)。"""
     from arena import run_match, PID_A, PID_B
     seed, side, key, value = job
     patches = {key: value} if key else None
+    bot = None
+    if _OPP:
+        from sparring import BOTS
+        bot = BOTS[_OPP]
     if side == "A":
-        r = run_match(seed, patches_a=patches)
+        r = run_match(seed, patches_a=patches, cls_b=bot)
         me, opp = PID_A, PID_B
     else:
-        r = run_match(seed, patches_b=patches)
+        r = run_match(seed, patches_b=patches, cls_a=bot)
         me, opp = PID_B, PID_A
     win = 1 if r[me]["score"] > r[opp]["score"] else 0
     draw = 1 if r[me]["score"] == r[opp]["score"] else 0
@@ -82,13 +94,16 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(1, mp.cpu_count() - 2))
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--param", type=str, help="只扫这个参数")
+    ap.add_argument("--opp", choices=("camper", "rusher"),
+                    help="对手用脚本陪练（变体打在我方侧）")
     ap.add_argument("--out", type=str, default="sweep_results.json")
     args = ap.parse_args()
     seeds = list(range(1, args.seeds + 1))
     t0 = time.time()
     results = {}
 
-    with mp.Pool(args.jobs) as pool:
+    with mp.Pool(args.jobs, initializer=_init_worker,
+                 initargs=(args.opp,)) as pool:
         base_rows = run_condition(pool, seeds, None, None)
         base = summarize(base_rows)
         results["baseline"] = {"summary": base, "rows": base_rows}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.18-race-tempo)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.19-camper-tuned)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.18-race-tempo</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.19-camper-tuned</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -516,10 +516,18 @@ selftest 163 项全绿；九局回放 vs V3.16 零差异（新分支语料无既
 <td>规则可证 ×3（①③短边④）+ 结构性缺陷 ×2（③租买⑤）+ 体检共识 ×2（②⑥）。
 竞速倍率 2.5 实测会砍掉开局冰链（败局13 血泪资产）回退 1.75 并豁免资源口径；
 selftest 192 项全绿（新增 29 项含 6 项反例）；replay 语料既有触发点零回归</td></tr>
+<tr><td><b>3.19 camper-tuned</b></td><td><b>离线竞技场陪练校准（arena + camper/rusher 脚本对手）：
+①CAMPER_GRACE 8→5——语料临别卡对手全部 1~4 帧内离开，5 = 观测上界+1；竞技场 camper 局 8→5 把
+3/24 未交付清零（3 帧级联：早出武关→赶在对手到潼关起卡前上边，45 帧汇聚等待消失），镜像局该参数
+不绑定无回归；②坐地户免宽限——起卡前已驻扎 ≥20 帧的对手不是临别过客，直接强通不白等；
+③陪练基建 sparring.py（camper=2614 六步套路复刻 / rusher=零贪婪竞速）+ sweep --opp</b></td>
+<td>vs CamperBot 24/24 全胜（此前 21/24，3 局终盘差 ~20 帧未交付）；vs RusherBot 12/12；镜像 6/1/5 均衡。
+camper 局参数重扫发现 RACE_FRAME_MULT / SWITCH_MARGIN / FUNNEL_GUARD_PRIOR 的最优方向与镜像局相反
+（拨动同一个漏斗前分叉、对手依赖）→ 对手画像分类器立项依据；selftest 194 项全绿</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.18-race-tempo ·
-自测 <code>python3 selftest.py</code>（192 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.19-camper-tuned ·
+自测 <code>python3 selftest.py</code>（194 项）</p>
 </div>
 
 <script>

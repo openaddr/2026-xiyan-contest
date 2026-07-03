@@ -628,6 +628,26 @@ def test_breakthrough():
                 any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
                     for x in a),
                 json.dumps(a, ensure_ascii=False))
+
+    # 12) 坐地户免宽限（V3.19）：对手起卡前已在节点驻扎 ≥20 帧 → 新卡也不给
+    #     宽限，立即强通。宽限的依据是"临别卡"，坐地户不是过客
+    st = PlannerStrategy()
+    for i in range(24):    # r300~323 对手驻扎 S10、无卡（我们在 S09 防陷阱等待）
+        st.decide(camped_state(defense=0, bad=2, round_no=300 + i))
+    a = st.decide(camped_state(defense=6, bad=2, round_no=326))  # 新卡出现
+    ok &= check("突破: 坐地户起新卡免宽限立即强通",
+                any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 12b) 反例：刚到就起卡的过客仍给宽限（V3.17 临别卡语料 6/6 不回退）
+    st = PlannerStrategy()
+    st.decide(camped_state(defense=0, bad=2, round_no=324))   # 对手刚停靠
+    a = st.decide(camped_state(defense=6, bad=2, round_no=326))
+    ok &= check("突破: 刚到的过客新卡仍给宽限",
+                not any(x["action"] in ("FORCED_PASS", "BREAK_GUARD")
+                        for x in a),
+                json.dumps(a, ensure_ascii=False))
     return ok
 
 

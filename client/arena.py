@@ -181,7 +181,7 @@ def final_score_parts(t):
 
 class Arena:
     def __init__(self, seed, patches_a=None, patches_b=None, log=None,
-                 strategy_cls=PlannerStrategy):
+                 strategy_cls=PlannerStrategy, cls_a=None, cls_b=None):
         import random as _random
         self.rng = _random.Random(f"arena:{seed}")
         self.seed = seed
@@ -244,8 +244,9 @@ class Arena:
                       PID_B: Team(PID_B, self.roles["startNodeId"])}
         self.strategies = {}
         self.states = {}
-        for pid, patches in ((PID_A, patches_a), (PID_B, patches_b)):
-            st = strategy_cls()
+        for pid, patches, cls in ((PID_A, patches_a, cls_a),
+                                  (PID_B, patches_b, cls_b)):
+            st = (cls or strategy_cls)()
             for key, val in (patches or {}).items():
                 scope, attr = key.split(".", 1)
                 obj = st.planner if scope == "planner" else st
@@ -1419,8 +1420,10 @@ class Arena:
         return out
 
 
-def run_match(seed, patches_a=None, patches_b=None, max_round=600):
-    return Arena(seed, patches_a, patches_b).run(max_round)
+def run_match(seed, patches_a=None, patches_b=None, max_round=600,
+              cls_a=None, cls_b=None):
+    return Arena(seed, patches_a, patches_b,
+                 cls_a=cls_a, cls_b=cls_b).run(max_round)
 
 
 def main():
@@ -1428,14 +1431,20 @@ def main():
     ap.add_argument("--seed", type=int)
     ap.add_argument("--seeds", type=str, help="如 1-20")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--opp", choices=("camper", "rusher"),
+                    help="B 座使用脚本陪练")
     args = ap.parse_args()
     seeds = [args.seed or 1]
     if args.seeds:
         lo, hi = args.seeds.split("-")
         seeds = list(range(int(lo), int(hi) + 1))
+    cls_b = None
+    if args.opp:
+        from sparring import BOTS
+        cls_b = BOTS[args.opp]
     rows = []
     for s in seeds:
-        r = run_match(s)
+        r = run_match(s, cls_b=cls_b)
         rows.append(r)
         a, b = r[PID_A], r[PID_B]
         if not args.json:
