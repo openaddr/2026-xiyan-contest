@@ -19,6 +19,7 @@
 """
 import json
 import os
+import re
 import sys
 
 # ============ 黑名单（只有这里列出的才动，其它一律保留） ============
@@ -74,7 +75,14 @@ SQUAD_COST = {"SQUAD_SCOUT": 1, "SQUAD_CLEAR": 2, "SQUAD_REINFORCE": 2, "SQUAD_W
 
 def parse(path):
     with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+        objs = []
+        for line in f:
+            if not line.strip():
+                continue
+            # 服务端回放里 sourceActionTypes 等字段用了裸数字 key（如 {2744:"CLEAR"}，非标准 JSON），补回双引号
+            line = re.sub(r'([{,]\s*)(-?\d+)(\s*:)', r'\1"\2"\3', line)
+            objs.append(json.loads(line))
+        return objs
 
 
 # ============ 固定枚举中文翻译表（仅协议里固定的码，key 保留英文方便检索） ============
