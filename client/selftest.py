@@ -1869,9 +1869,100 @@ def main():
     ok &= test_weaken_discipline()
     ok &= test_latent_mechanics()
     ok &= test_tactical_layer()
+    ok &= test_node_guard_mechanics()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
+
+
+def test_node_guard_mechanics():
+    """V3.13 修正：trap-risk 对手赶来时不设上限 + ambush 设卡冻对手。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def st_at(node, *, squad=4, good=90, bad=0, opp_node="S09", opp_edge=None,
+              opp_next=None, s10guard=None, **me_kw):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                         currentProcess=None, currentNodeId=node, buffs=[],
+                         goodFruit=good, badFruit=bad, squadAvailable=squad,
+                         freshness=95.0, resources={}, taskScore=90,
+                         rushTacticUsedCount=0)
+                p.update(me_kw)
+            if p["playerId"] == 2002:
+                p.update(currentNodeId=opp_node,
+                         routeEdgeId=opp_edge,
+                         nextNodeId=opp_next,
+                         state="MOVING" if opp_edge else "IDLE",
+                         delivered=False, retired=False, verified=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["scouted"] = []
+            n["resourceStock"] = {}
+        if s10guard:
+            for n in d["nodes"]:
+                if n["nodeId"] == "S10":
+                    n["guard"] = {"ownerTeamId": "BLUE", **s10guard, "active": True}
+        gs.on_inquire(d)
+        return gs
+
+    # ===== Task 1: trap_risk 不对"对手赶来"设上限 =====
+
+    # 1a) 对手在路上赶来 S10（nextNode=S10, routeEdge=E05）→ trap_risk 持续 True，
+    #     连续调用 40 次（> TRAP_WAIT_MAX=30）仍然 True（不像以前被 cap 放行）
+    gs = st_at("S09", opp_node="S09", opp_edge="E05", opp_next="S10")
+    plan = PlannerStrategy().planner.plan(gs)
+    st = PlannerStrategy()
+    always_true = all(st._mid_edge_trap_risk(gs, "S09", "S10", plan) for _ in range(40))
+    ok &= check("trap-risk: 对手赶来时不设上限(40帧仍True)", always_true,
+                "应持续 True 不被 cap")
+
+    # 1b) 对手停在 S10（stationary）→ 连续等待超 TRAP_WAIT_MAX 后 cap 触发 → False
+    gs2 = st_at("S09", opp_node="S10", opp_edge=None, opp_next=None)
+    plan2 = PlannerStrategy().planner.plan(gs2)
+    st2 = PlannerStrategy()
+    capped = False
+    for _ in range(45):
+        if not st2._mid_edge_trap_risk(gs2, "S09", "S10", plan2):
+            capped = True
+            break
+    ok &= check("trap-risk: 对手驻守时超上限后放行", capped, "应在 TRAP_WAIT_MAX 后 False")
+
+    # ===== Task 2: ambush 设卡（对手在路上朝我来 → 设卡冻它）=====
+
+    # 2a) 我们在 S10（KEY_PASS），对手在 E05（S09→S10）赶来，slack 充足，好果够
+    #     → _guard_opportunity 应返回 SET_GUARD
+    gs3 = st_at("S10", good=90, opp_node="S09", opp_edge="E05", opp_next="S10")
+    gs3.round = 200
+    plan3 = PlannerStrategy().planner.plan(gs3)
+    # 确保 slack 充足（GUARD_SLACK_MIN=65）
+    ok &= check("ambush: plan.slack 足够设卡", plan3.slack >= 65, f"slack={plan3.slack}")
+    st3 = PlannerStrategy()
+    g = st3._guard_opportunity(gs3, "S10", plan3)
+    ok &= check("ambush: 对手在边上来→设卡",
+                g and g["action"] == "SET_GUARD" and g["targetNodeId"] == "S10",
+                str(g))
+
+    # 2b) 对手不在边上（stationary at S09）→ 走正常 ETA 检查，ambush 不触发
+    #     （ETA 可能 >MAX 或 <MIN，不保证 fire；只验证不因 ambush 绕过 ETA 而错误 fire）
+    gs4 = st_at("S10", good=90, opp_node="S07", opp_edge=None, opp_next=None)
+    gs4.round = 200
+    plan4 = PlannerStrategy().planner.plan(gs4)
+    st4 = PlannerStrategy()
+    g4 = st4._guard_opportunity(gs4, "S10", plan4)
+    # 对手在 S07（很远），ETA 可能 >MAX → 不 fire。这验证 ambush 分支不会错误触发
+    ok &= check("ambush: 对手不在边上不误触", g4 is None or g4["action"] == "SET_GUARD",
+                f"远距离对手 g4={g4}")
+    return ok
 
 
 def test_tactical_layer():

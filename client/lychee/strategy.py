@@ -503,7 +503,17 @@ class PlannerStrategy(BaselineStrategy):
             return None
         g_graph = state.graph
         opp_eta = self.planner._opp_eta(state, cur)
-        if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
+
+        # Ambush 设卡（V3.13）：对手已上路朝我们来（routeEdgeId 有效 + nextNode==我们）
+        # → 它不能原路退回（规则 4.2），只能改道（被下方路线容差过滤）。
+        # 此时设卡，4 帧完成时它还在边中段 → 不能攻坚（规则 6.3.1 要求在节点上）
+        # → 被冻到风化/削弱。绕过 ETA 下限（它已 commit，ETA 小没问题），
+        # 但要求 ETA > 4（设卡读条完成前它还没到）。
+        ambush = bool(opp.get("routeEdgeId")) and opp.get("nextNodeId") == cur
+        if ambush:
+            if opp_eta <= 4:
+                return None  # 太近了：设卡还没完成它就到了
+        elif not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
             return None
         # 两侧都用含边上余量的同一度量（V3.7：度量不一致曾让该检查恒假）
         opp_to_gate = self.planner._opp_eta(state, state.gate_node)
@@ -758,6 +768,10 @@ class PlannerStrategy(BaselineStrategy):
         规则依据：SET_GUARD 目标必须是其当前节点。对手离开该节点后就永远
         不能再在那里设卡；等待期间它若留卡，我们站在节点上攻坚拆（2好果+
         坏果瞬拆）远比中边冻结（6人手削弱 / 180帧风化）便宜。
+
+        V3.13 修正：TRAP_WAIT_MAX 只对"对手停在目标上"的僵局生效；对手在
+        路上赶来时不设上限——等它到达后要么设卡（我们从节点攻坚）要么离开
+        （安全上边），结果自然收敛。replay44 因 cap 过早释放被冻 75 帧。
         """
         def give_up():
             self._trap_wait = (None, 0)
@@ -766,20 +780,16 @@ class PlannerStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return give_up()
-        # V3.12 删证据门：V3.9 曾要求"对手本局设过卡"才等待，但首卡必然
-        # 没有前科（replay36: 2614 全场第一张卡 r314 掐在我们上边后，几何+
-        # 地形全中仍被放行，冻 195 帧零交付）。replay27 型误伤由地形门兜底：
-        # 三段罚站中两段目标是普通驿站，本就不该等；剩余咽喉段误伤上限
-        # TRAP_WAIT_MAX（30 帧 ≈ 6.6 分）<< 冻结 180+ 帧。
-        # 地形门：实战陷阱只发生在咽喉类节点（S10/S11），普通驿站不设防
         if state.node(nxt).get("nodeType") not in self.GUARD_NODE_TYPES:
             return give_up()
 
         opp_cur = opp.get("currentNodeId")
         opp_next = opp.get("nextNodeId")
         risk = False
+        risk_stationary = False
         if not opp.get("routeEdgeId") and opp_cur == nxt:
-            risk = True        # 它正站在我们的下一跳上
+            risk = True               # 它正站在我们的下一跳上
+            risk_stationary = True
         elif opp_next == nxt:
             # 它正赶往我们的下一跳：若它先到且来得及成卡（4帧），同样危险
             opp_eta = self.planner._opp_eta(state, nxt)
@@ -789,15 +799,20 @@ class PlannerStrategy(BaselineStrategy):
 
         if not risk:
             return give_up()
-        # 防赖着不走的对峙：同一节点连续等待超过上限就硬闯
-        node, n = self._trap_wait
-        n = n + 1 if node == nxt else 1
-        self._trap_wait = (nxt, n)
-        if n > self.TRAP_WAIT_MAX:
-            if self.log:
-                self.log.info("trap standoff at %s exceeded %d frames, pushing",
-                              nxt, self.TRAP_WAIT_MAX)
-            return False
+
+        # 对手停在目标上的僵局才设上限（防赖着不走）；对手在路上赶来时
+        # 不设上限——等它到达后结果自然收敛（设卡→攻坚 / 离开→安全上边）
+        if risk_stationary:
+            node, n = self._trap_wait
+            n = n + 1 if node == nxt else 1
+            self._trap_wait = (nxt, n)
+            if n > self.TRAP_WAIT_MAX:
+                if self.log:
+                    self.log.info("trap standoff at %s exceeded %d frames, pushing",
+                                  nxt, self.TRAP_WAIT_MAX)
+                return False
+        else:
+            self._trap_wait = (None, 0)  # 对手在赶来：重置计数，不设上限
         return True
 
     # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------
