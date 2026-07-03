@@ -283,16 +283,34 @@ def test_planner():
                 f"{a1} -> {a2}")
 
     # ---- 场景1e3: RUSH 移动中截止吃紧优先疾行令（唯一能在 MOVING 里提交的急策）----
-    gs = make_state(round_no=580, node="S09")
-    gs.phase = "RUSH"
-    for p in gs.players.values():
-        if p["playerId"] == 1001:
-            p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
-                     routeEdgeId="E09", buffs=[], resources={}, rushTacticUsedCount=0)
-    a = PlannerStrategy().decide(gs)
+    def rushing_state(good=88):
+        gs = make_state(round_no=580, node="S09")
+        gs.phase = "RUSH"
+        for p in gs.players.values():
+            if p["playerId"] == 1001:
+                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                         routeEdgeId="E09", buffs=[], resources={},
+                         rushTacticUsedCount=0, goodFruit=good)
+        return gs
+
+    a = PlannerStrategy().decide(rushing_state())
     kinds = {x["action"]: x for x in a}
+    mains = [x for x in a if x["action"] in P.MAIN_ACTION_TYPES]
     ok &= check("急策: 截止吃紧移动中优先疾行令",
                 kinds.get("RUSH_SPEED") is not None,
+                json.dumps(a, ensure_ascii=False))
+    # 疾行令按主车队动作提交（4.1）：同帧绝不允许再补 MOVE，否则双主动作
+    # 全部作废 + 记非法，急策名额还被本地标记锁死
+    ok &= check("急策: 疾行令同帧不补 MOVE（单主车队动作）",
+                len(mains) == 1 and "MOVE" not in kinds,
+                json.dumps(a, ensure_ascii=False))
+
+    # 好果不足 3（疾行令费 2 且交付要求好果 >0）：不发，名额不被拒绝锁死
+    st_poor = PlannerStrategy()
+    a = st_poor.decide(rushing_state(good=2))
+    kinds = {x["action"]: x for x in a}
+    ok &= check("急策: 好果不足不发疾行令（名额留给停靠三选一）",
+                "RUSH_SPEED" not in kinds and not st_poor._rush_tactic_tried,
                 json.dumps(a, ensure_ascii=False))
 
     # ---- 场景2: 截止临近（r560）应放弃任务直奔交付线 ----
@@ -1915,6 +1933,32 @@ def test_latent_mechanics():
     a = st3.squad_action(gs, Plan("deliver", slack=200))
     ok &= check("续防: 领先时不续（无主动撤卡手段，只能不主动养大悬赏敞口）",
                 a is None, str(a))
+
+    # ---- 宫门设卡成本: S14 防守值上限 4（6.2.1），extra=1 即拉满，
+    # extra=2 超上限那篓不提防守且不返还，纯白烧 ----
+    gs = base_state(cur="S14")
+    for p in gs.players.values():
+        if p["playerId"] != 1001:  # 对手在 S13，ETA ~25 帧落在设卡窗口 [8,150]
+            p.update(currentNodeId="S13", nextNodeId=None, routeEdgeId=None)
+    a = PlannerStrategy()._guard_opportunity(gs, "S14", Plan("task", position="S07", slack=200))
+    ok &= check("设卡: 宫门上限4只投1篓（不投溢出）",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["extraGoodFruit"] == 1, str(a))
+
+    # ---- 情报时机门: 宫门等 RUSH 时 355 帧后才标宫门（标记只活 45 帧）----
+    st4 = PlannerStrategy()
+    gs = base_state(cur="S14", round_no=360, resources={"INTEL": 1})
+    plan = st4.planner.plan(gs)
+    a = st4.main_action(gs, plan)
+    ok &= check("情报: 宫门等 RUSH 时 355 帧后标宫门",
+                a and a["action"] == "USE_RESOURCE" and a["resourceType"] == "INTEL"
+                and a.get("targetNodeId") == "S14", str(a))
+
+    gs = base_state(cur="S14", round_no=300, resources={"INTEL": 1})
+    plan = st4.planner.plan(gs)
+    a = st4.main_action(gs, plan)
+    ok &= check("情报: 355 帧前不标宫门（必然过期白扔）",
+                a == {"action": "WAIT"}, str(a))
     return ok
 
 

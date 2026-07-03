@@ -191,13 +191,6 @@ class GameState:
             return False
         return (self.me.get("totalScore", 0) or 0) < (opp.get("totalScore", 0) or 0)
 
-    def bounty_for_node(self, node_id):
-        """目标节点当前生效（未完成、未过期）的悬赏；无则 None。"""
-        for b in self.bounties:
-            if b.get("nodeId") == node_id and b.get("active") and not b.get("completed"):
-                return b
-        return None
-
     def enemy_bounties(self):
         """挂在敌方仍然有效设卡上的悬赏：只有这类悬赏才轮到我方攻破拿分。
 

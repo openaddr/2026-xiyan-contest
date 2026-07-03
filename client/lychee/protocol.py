@@ -100,10 +100,12 @@ RUSH_PROTECT = "RUSH_PROTECT"
 BREAK_ORDER = "BREAK_ORDER"
 
 # ---------- 主车队动作集合 ----------
+# 疾行令/护果令按主车队动作提交并占用主车队额度（任务书 4.1）——漏掉它们
+# 曾让"移动中补显式 MOVE"的逻辑同帧追加 MOVE，双主车队动作全部作废+记非法
 MAIN_ACTION_TYPES = {
     "WAIT", "MOVE", "PROCESS", "DOCK", "CLAIM_RESOURCE", "USE_RESOURCE",
     "CLAIM_TASK", "CLEAR", "SET_GUARD", "BREAK_GUARD", "FORCED_PASS",
-    "VERIFY_GATE", "DELIVER",
+    "VERIFY_GATE", "DELIVER", "RUSH_SPEED", "RUSH_PROTECT",
 }
 
 # ---------- 常见错误码（业务拒绝 / 非法动作） ----------

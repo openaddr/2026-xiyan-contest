@@ -348,10 +348,14 @@ class PlannerStrategy(BaselineStrategy):
             if not state.has_move_buff():
                 # 终局急策三选一（V3.12）：截止吃紧的追分局，速度比护果令/破关令更值钱
                 # ——疾行令 15 帧内+30%速度，是唯一能在 MOVING 中提交的急策，不必等到
-                # 停靠再选（任务书 8.2：MOVING 状态允许马类资源和疾行令）
+                # 停靠再选（任务书 8.2：MOVING 状态允许马类资源和疾行令）。
+                # 成本前置：疾行令花 2 好果（6.5），交付还要求好果 >0——好果不足时
+                # 提交只会被业务拒绝，而 _rush_tactic_tried 已置位不再重试，
+                # 等于把整局唯一的急策名额白白锁死，所以 <3 篓不发
                 if (state.phase == P.PHASE_RUSH and plan is not None and plan.slack < 0
                         and (me.get("rushTacticUsedCount") or 0) == 0
-                        and not self._rush_tactic_tried):
+                        and not self._rush_tactic_tried
+                        and me.get("goodFruit", 0) >= 3):
                     self._rush_tactic_tried = True
                     return P.a_rush_speed()
                 reserve = self.planner.horses_reserved(state)
@@ -393,7 +397,8 @@ class PlannerStrategy(BaselineStrategy):
                     if me.get("freshness", 0) < 100:
                         return P.a_rush_protect()
                 return P.a_verify_gate()
-            return P.a_wait()
+            # 等 RUSH 的长空转正是情报最值钱的地方：355 帧后标宫门，验核 6→3
+            return self._idle_upgrade(state, plan)
 
         # 固定处理站点必须先处理完才能离站。
         # V3.7：不再奇偶让行 —— 对不让行的对手等于每次白送 5 帧先手，
@@ -513,11 +518,13 @@ class PlannerStrategy(BaselineStrategy):
                 opp_eta + here_to_gate > opp_to_gate + self.GUARD_ROUTE_TOLERANCE:
             return None  # 绕开我们这里更快，卡了也白卡
 
-        # 成本：关键关隘/宫门底价 1 好果 + 额外 2 好果拉满防守值 6
-        # （防 2 的卡 30 帧就风化半残，不值底价；投不满就不投）
+        # 成本：关键关隘/宫门底价 1 好果 + 额外好果按节点防守值上限投满不投溢
+        # （防 2 的卡 30 帧就风化半残，不值底价；投不满就不投）。
+        # 宫门上限 4（6.2.1）：extra=1 即 2+2=4 拉满，extra=2 超上限的那篓
+        # 不提防守且成本不返还，纯白烧
         good = me.get("goodFruit", 0)
         base_cost = 1 if node.get("nodeType") in ("KEY_PASS", "GATE") else 0
-        extra = 2
+        extra = 1 if node.get("nodeType") == "GATE" else 2
         if good - base_cost - extra <= self.MIN_GOOD_RESERVE:
             return None  # 好果太紧，不做对抗投资
         self._guard_sent[cur] = state.round
@@ -601,7 +608,9 @@ class PlannerStrategy(BaselineStrategy):
         candidates = []
         if plan and plan.kind == "task" and plan.position:
             candidates.append(plan.position)
-        if not me.get("verified"):
+        # 宫门时机门与小分队探路同款（GATE_SCOUT_FROM）：标记只活 45 帧，
+        # 验核最早 ~390 帧开放，355 帧前标宫门必然过期白扔
+        if not me.get("verified") and state.round >= self.GATE_SCOUT_FROM:
             candidates.append(state.gate_node)
         node = state.node(cur)
         # 正在等的原因如果是本站还没处理完，标自己这站对下一次处理直接有用；
