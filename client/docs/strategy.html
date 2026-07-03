@@ -209,7 +209,12 @@
       <li><b>估值</b> = 边际任务收益（按 3.1 曲线）×（对手更近则 ×0.5；对手正在处理→放弃）
           − (绕路+读条) × 帧价值 0.227/帧（鲜度 0.11 + 用时 0.117，恒计）</li>
     </ul></li>
-  <li>净收益最高且 &gt; 0 → <span class="ret">task</span>；否则 <span class="ret">deliver</span></li>
+  <li>资源提货目标（冰鉴/马匹）与任务同台竞价，净收益最高者胜出</li>
+  <li>（V3.12）落后时（totalScore &lt; 对手）追加悬赏目标同台竞价：敌方仍有效设卡上挂着的悬赏，
+      单次攻坚可破（好果坏果上限内）且绕路净收益 &gt; 0 → <span class="ret">bounty</span>；
+      领先时不参与竞价（6.3.3：只有落后方攻破才计分，打了也白打）</li>
+  <li>净收益最高且 &gt; 0 → <span class="ret">task</span> / <span class="ret">resource</span> /
+      <span class="ret">bounty</span>；否则 <span class="ret">deliver</span></li>
 </ol>
 
 <h3>3.3 马匹预留（horses_reserved）</h3>
@@ -242,21 +247,29 @@
         <li class="act-main" style="border-left:5px solid var(--main-c)">鲜度 &lt; 91 且有冰鉴 →
             <span class="ret">USE_RESOURCE(ICE_BOX)</span><br><small>优先于一切等待/交付：+10鲜度≈18分，防跌破 90/80/70… 转坏阈值</small></li>
         <li>在终点 S15：已验核且好果&gt;0且鲜度&gt;0 → <span class="ret">DELIVER</span>；否则 <span class="ret">WAIT</span></li>
-        <li>在宫门 S14 未验核且计划=deliver：RUSH 阶段 → 急策未用先
-            <span class="ret" style="color:var(--rush-c)">RUSH_PROTECT</span>（护果令，30帧鲜度×0.2）再
+        <li>在宫门 S14 未验核且计划=deliver：RUSH 阶段 → 急策未用先比较三选一
+            （V3.12：坏果 ≥2 或好果留底仓外仍有余 →
+            <span class="ret" style="color:var(--rush-c)">VERIFY_GATE(破关令)</span>近乎免费省3帧；
+            否则鲜度&lt;100 才打 <span class="ret" style="color:var(--rush-c)">RUSH_PROTECT</span>）再
             <span class="ret">VERIFY_GATE</span>；非 RUSH → <span class="ret">WAIT</span></li>
-        <li>固定处理站未完成：对手正在处理本站 → <span class="ret">WAIT</span>（排队）；
-            奇偶错峰命中 → <span class="ret">WAIT</span>（避免同帧创建窗口）；否则 <span class="ret">PROCESS</span></li>
+        <li>固定处理站未完成：对手正在处理本站 → <span class="ret">情报空转帧</span>（V3.12：有 INTEL 就
+            顺手标本站，见下）；否则 <span class="ret">PROCESS</span></li>
         <li>计划=task 且已到任务站位 → <span class="ret">CLAIM_TASK</span>（独占对象，不让行）</li>
         <li>主动设卡机会（§6 条件全满足）→ <span class="ret">SET_GUARD(防守值6)</span></li>
-        <li>顺路领取（计划=task 或 slack&gt;80）：冰鉴上限2、快马/短程马各1；
-            错峰命中先 <span class="ret">WAIT</span> 一帧 → <span class="ret">CLAIM_RESOURCE</span></li>
-        <li>赶路（目标 = 任务点 / 未验核→宫门 / 已验核→终点，寻路含阻挡惩罚）：<br>
+        <li>顺路领取（计划=task/resource/bounty 或 slack&gt;15）：冰鉴上限2，快马/短程马/过所/官凭/
+            情报各1（V3.12 补上文书与情报）；错峰命中先 <span class="ret">WAIT</span> 一帧 →
+            <span class="ret">CLAIM_RESOURCE</span></li>
+        <li>尾段蹲刷候选点上等刷新 → <span class="ret">情报空转帧</span>（同上）</li>
+        <li>赶路（目标 = 任务点 / 资源点 / 悬赏目标(V3.12) / 未验核→宫门 / 已验核→终点，寻路含阻挡惩罚）：<br>
             下一跳有障碍无卡：好果&gt;1 → <span class="ret">CLEAR</span> 否则 <span class="ret">WAIT</span><br>
-            下一跳有敌卡 → <b>突破梯队</b>（§5）<br>
-            对手正在下一跳读条设卡 → <span class="ret">WAIT</span>（等卡成型后节点攻坚，绝不上边挨冻）<br>
+            下一跳有敌卡 → <b>突破梯队</b>（§5，悬赏目标同样在此接管攻坚）<br>
+            对手正在下一跳读条设卡 / 中边陷阱风险 → <span class="ret">情报空转帧</span>（等卡成型后节点攻坚，绝不上边挨冻）<br>
             畅通 → <span class="ret">MOVE(下一跳)</span></li>
       </ol>
+      <div class="node" style="margin-top:8px"><b>情报空转帧（V3.12）</b>：上述几处"注定 WAIT"的分支改为
+        先查手里有没有 INTEL——有且目标（计划任务点 / 未验核时的宫门 / 本站，取距离≤15且未标记者）
+        存在 → <span class="ret">USE_RESOURCE(INTEL, 目标)</span>；没有则老实 <span class="ret">WAIT</span>。
+        效果同小分队探路（处理帧−3，最低2），但零人手成本，机会成本≈0。</div>
     </div>
   </div>
 </div>
@@ -310,6 +323,14 @@
     · 计划任务点（人未到才探——就地开读条吃不到减时；人手 &gt; 1 才派）<br>
     通过条件：目标无本队有效标记 · 同目标重发间隔 25 帧 · 到目标 ETA ≤ 40 帧（否则标记先过期）<br>
     <small>效果：探路标记使该点处理帧数 −3（最低2）——宫门验核 6→3，读条任务同理</small></div>
+  <div class="arrow">↓ 无探路需求，人手≥2</div>
+  <div class="node act-squad">优先级 3（V3.12）—— <span class="ret">SQUAD_REINFORCE(续防)</span>：
+    仅 is_behind() 时给自家风化中（防守值&lt;4）的设卡续 +2，且对手 ETA∈[8,150] 仍会经过；
+    领先时故意不续——没有主动撤卡手段，唯一能做的是不主动把卡续到悬赏 30/60 帧触发线上送对手追分分</div>
+  <div class="arrow">↓ 无续防需求，人手≥2</div>
+  <div class="node act-squad">优先级 4（V3.12）—— <span class="ret">SQUAD_CLEAR(远程清障)</span>：
+    去任务/资源/交付目标路上撞见非 T04 障碍就派（主车队不用绕路/自己 CLEAR）；
+    严格排除自己在做的 T04 目标——那要靠 CLAIM_TASK 才算数，代劳清障只会让该 T04 失败且不重刷</div>
 </div>
 
 <!-- ================================================================ -->
@@ -321,7 +342,7 @@
 <tr><td>强行 QIANG_XING</td><td>有马类/疾行令增益时<b>免费</b>，否则耗 1 马</td><td>胜献贡</td><td>3.0（仅增益期入池）</td></tr>
 <tr><td>兵争 BING_ZHENG</td><td>1 护卫行动点（初始4，无其他用途=免费筹码）</td><td>胜验牒/强行</td><td>3.0</td></tr>
 <tr><td>献贡 XIAN_GONG</td><td>1 好果，要求鲜度 ≥80（好果&gt;2 才入池）</td><td>胜验牒/兵争</td><td>2.0</td></tr>
-<tr><td>验牒 YAN_DIE</td><td>1 文书（过所/官凭）</td><td>胜强行</td><td>1.5</td></tr>
+<tr><td>验牒 YAN_DIE</td><td>1 文书（过所/官凭；V3.12 起顺路主动领取，不再指望白捡）</td><td>胜强行</td><td>1.5</td></tr>
 <tr><td>弃权 ABSTAIN</td><td>0</td><td>—</td><td>资源窗口 1.5（低价值少花钱）/ 其他 0.5</td></tr>
 </table>
 <div class="node">多窗口同帧只能出 1 张：优先「计划中的任务窗口」→「宫门 GATE」→ 其他；未出牌的窗口自动按弃权结算，无惩罚</div>
@@ -364,6 +385,10 @@
 <tr><td>GUARD_* 设卡窗口</td><td>ETA∈[8,150] / slack&gt;80 / 容差15 / 重试40</td><td>见 §6 逐条注释</td></tr>
 <tr><td>马匹预留</td><td>1 匹（T06 在场/会刷 且 base&lt;110 且 r&lt;350 且非RUSH）</td><td>省 2 帧 vs 30 分任务</td></tr>
 <tr><td>任务档位</td><td>保 90 冲 110+</td><td>90 解锁满额送达 240 + 用时不折 + 里程碑 +35</td></tr>
+<tr><td>悬赏追分门（V3.12）</td><td>只在 totalScore 落后时追；单次攻坚上限好果2+坏果2=10 防守值</td><td>6.3.3：攻破方总分需低于设卡方才计分，领先时打了也白打；车轮战式硬拆不专程绕路，留给挡路时顺手打</td></tr>
+<tr><td>情报距离上限</td><td>15（任务书 3.3.4 硬规则）</td><td>空转帧顺手用：排队/防陷阱/蹲刷等注定 WAIT 的帧不占移动时间</td></tr>
+<tr><td>续防门（V3.12）</td><td>仅 is_behind() 时续；防守值&lt;4 才续；对手 ETA∈[8,150]</td><td>领先时故意不续——没有主动撤卡手段，唯一能做的是不主动把自家卡续到悬赏 30/60 帧触发线上</td></tr>
+<tr><td>远程清障重发间隔</td><td>18 帧</td><td>落地延迟上限 15 帧 + 余量，防重复派人；绝不碰自己在做的 T04 目标</td></tr>
 </table>
 
 <!-- ================================================================ -->
@@ -389,10 +414,18 @@
 <tr><td>3.9 trap-evidence</td><td><b>陷阱等待加双闸门：证据门（对手本局设过卡才设防，事件流+节点卡自动侦测）+ 地形门（只在咽喉类节点设防）</b></td><td>replay27（681:747）：开局全面领先（S02 窗口胜+冰保卫首胜+双任务），r96 起把跑在前面的 2613（历史零设卡）当埋伏者，S03/S07/S09 三次罚站共 90 帧，官道任务被横扫 90:180——对非设卡者的过度防御比陷阱本身更贵</td></tr>
 <tr><td>3.10 tail-farm</td><td><b>尾段蹲刷：无目标且余量&gt;110、里程碑未满时，站在任务候选点等刷新（预算 50 帧）；离路资源折扣下限 0.7→0.85</b></td><td>三局对真人（736:767 / 738:749 / 725:751）：任务全部集中在前 200 帧、尾段近 300 帧零任务——任务刷新跟在车队身后，领跑者吃冰、跟随者吃刷新；base 90→130 值 +55 分而快 40 帧只值~8 分，计分结构要求为任务留出时间</td></tr>
 <tr><td><b>3.11 follower-doctrine</b></td><td><b>蹲刷加跟随者闸门（领先时不蹲，保节奏防设卡者反超）；可行性硬约束改时间口径（价值帧膨胀曾把山冰线卡在 slack 外）；冰鉴 17→19（含阈值转坏保险）；任务竞争折扣加离路软化</b></td><td>vs 2614 输窗口后走水路鲜度输局：仿真证实水路+任务流是绝对分最优（山冰绕行诚实亏 14 分）——输起跑窗口后的正确画像是跟随者（蹲刷农任务），赢窗口时依旧双冰官道领跑；五图开局回归全部不变</td></tr>
+<tr><td><b>3.12 latent-mechanics</b></td><td><b>策略体检发现六项零引用规则机制，逐条补上并各带一个"不该触发不触发"反例：
+①悬赏追分——state.bounties/totalScore 此前零引用，现在落后时专程绕路攻敌方带悬赏的设卡（净值=rewardScore−绕路成本，穷举防守值上限证明单独加宽削弱容忍度是死代码后未采用，改为直接靠既有削弱优先级自然接管）；
+②情报（INTEL）——CLAIM_EN_ROUTE 补上顺路领取，且在排队/防陷阱/蹲刷等注定 WAIT 的空转帧顺手用掉（机会成本≈0，不专程停下）；
+③过所/官凭——CLAIM_EN_ROUTE 补上，此前 YAN_DIE 出牌选项常年不在池子里；
+④终局急策三选一——此前硬编码只试护果令，现在坏果充足时优先破关令绑验核（近乎免费省3帧），移动中截止吃紧（slack&lt;0）优先疾行令（唯一能在 MOVING 提交的急策）；
+⑤小分队远程清障——路上非 T04 障碍派小分队清，主车队不用绕路/自己 CLEAR，严格排除自己在做的 T04 目标；
+⑥小分队续防——仅落后时给风化中的自家设卡续防守值，领先时故意不续（没有主动撤卡手段，唯一能做的是不主动把卡续到悬赏触发线上送对手追分分）
+</b></td><td>按任务书逐条对账代码引用面发现的规则数学空白：bounties[]/totalScore/SQUAD_REINFORCE/SQUAD_CLEAR/INTEL/PASS_TOKEN/OFFICIAL_PERMIT 全零引用；九局真图全量重放（round-by-round 全量决策 diff）+139 项 selftest 验证：唯一的早局分歧是 r86 在 S03 顺手领过所（对手已离场无竞争）和窗口出牌池变化（新增 YAN_DIE 选项后混合出牌落点改变，属设计内随机性），S02 起跑窗口画像不受影响</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.11-follower-doctrine ·
-自测 <code>python3 selftest.py</code>（120 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.12-latent-mechanics ·
+自测 <code>python3 selftest.py</code>（131 项）</p>
 </div>
 
 <script>

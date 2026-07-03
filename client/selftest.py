@@ -16,7 +16,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lychee import protocol as P
-from lychee.planner import marginal_task_value, task_component_score
+from lychee.planner import marginal_task_value, task_component_score, Plan
 from lychee.state import GameState
 from lychee.strategy import BaselineStrategy, PlannerStrategy
 from lychee_basic_client.framing import read_frame, write_frame
@@ -254,19 +254,46 @@ def test_planner():
                 a and a["action"] == "CLAIM_RESOURCE" and a["resourceType"] == "ICE_BOX",
                 str(a))
 
-    # ---- 场景1e: RUSH 在宫门先打护果令再验核 ----
+    # ---- 场景1e: RUSH 在宫门用坏果破关令代替护果令（V3.12：坏果 12 篓近乎
+    # 白送，破关令绑验核省 3 帧且几乎零成本，优先于要烧鲜度损耗才见效的护果令）----
     gs = make_state(node="S14")
     gs.phase = "RUSH"
     for p in gs.players.values():
         if p["playerId"] == 1001:
             p["rushTacticUsedCount"] = 0  # 样例里已用过急策，重置以测该分支
+            # 样例默认 goodFruit=88 badFruit=12：坏果充足，应该走破关令分支
+    a1 = PlannerStrategy().main_action(gs)
+    ok &= check("急策: 坏果充足优先破关令绑验核",
+                a1 and a1["action"] == "VERIFY_GATE" and a1.get("rushTactic") == "BREAK_ORDER",
+                str(a1))
+
+    # ---- 场景1e2: 坏果不足、好果紧张时回落护果令 ----
+    gs = make_state(node="S14")
+    gs.phase = "RUSH"
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["rushTacticUsedCount"] = 0
+            p["goodFruit"], p["badFruit"] = 5, 0  # 好果只够留底仓，坏果为 0
     st = PlannerStrategy()
     a1 = st.main_action(gs)
     a2 = st.main_action(gs)
-    ok &= check("急策: 验核前打护果令",
+    ok &= check("急策: 坏果不足回落护果令",
                 a1 and a1["action"] == "RUSH_PROTECT"
                 and a2 and a2["action"] == "VERIFY_GATE",
                 f"{a1} -> {a2}")
+
+    # ---- 场景1e3: RUSH 移动中截止吃紧优先疾行令（唯一能在 MOVING 里提交的急策）----
+    gs = make_state(round_no=580, node="S09")
+    gs.phase = "RUSH"
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                     routeEdgeId="E09", buffs=[], resources={}, rushTacticUsedCount=0)
+    a = PlannerStrategy().decide(gs)
+    kinds = {x["action"]: x for x in a}
+    ok &= check("急策: 截止吃紧移动中优先疾行令",
+                kinds.get("RUSH_SPEED") is not None,
+                json.dumps(a, ensure_ascii=False))
 
     # ---- 场景2: 截止临近（r560）应放弃任务直奔交付线 ----
     gs = make_state(round_no=560, node="S09")
@@ -1546,6 +1573,155 @@ def test_tail_farm():
     return ok
 
 
+def test_latent_mechanics():
+    """V3.12：悬赏追分、情报空转帧顺手用、文书顺路领取、远程清障/续防。
+
+    此前 bounties[]/totalScore/INTEL/PASS_TOKEN/OFFICIAL_PERMIT/SQUAD_CLEAR/
+    SQUAD_REINFORCE 全部零引用（见策略体检）。这里逐条验证新逻辑，且每条都
+    带一个"不该触发时不触发"的反例，防止重蹈"主动设卡因 ETA=0 从未触发"
+    的覆辙。
+    """
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def base_state(cur="S01", round_no=2, my_score=0, opp_score=0, resources=None,
+                    bounties=None, clear_stock=True):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["bounties"] = bounties or []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                         currentProcess=None, currentNodeId=cur, buffs=[],
+                         goodFruit=90, badFruit=4, squadAvailable=8,
+                         freshness=95.0, resources=resources or {},
+                         taskScore=0, totalScore=my_score, verified=False,
+                         delivered=False, retired=False)
+            else:
+                p.update(state="IDLE", currentNodeId="S13", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         totalScore=opp_score, delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["guard"] = None
+            n["hasObstacle"] = False
+            if clear_stock:
+                n["resourceStock"] = {}
+        gs.on_inquire(d)
+        return gs
+
+    # ---- 悬赏 1: 落后时专程绕路打敌方设卡拿悬赏（S08 不在 S01->S14 最短路上）----
+    gs = base_state(cur="S01", my_score=600, opp_score=700)  # 落后 100 分
+    gs.nodes["S08"]["guard"] = {"ownerTeamId": "BLUE", "defense": 4,
+                                "maxDefense": 6, "active": True}
+    gs.bounties = [{"bountyId": "B_S08", "bountyType": "NORMAL_BOUNTY",
+                    "nodeId": "S08", "rewardScore": 18, "active": True,
+                    "completed": False, "winnerPlayerId": 0}]
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    ok &= check("悬赏: 落后时专程绕路攻敌方带悬赏的卡",
+                plan.kind == "bounty" and plan.position == "S08", repr(plan))
+
+    # ---- 悬赏 2: 领先时同样的局面不追（追分口径，见 6.3.3） ----
+    gs2 = base_state(cur="S01", my_score=700, opp_score=600)  # 领先 100 分
+    gs2.nodes["S08"]["guard"] = {"ownerTeamId": "BLUE", "defense": 4,
+                                 "maxDefense": 6, "active": True}
+    gs2.bounties = [{"bountyId": "B_S08", "bountyType": "NORMAL_BOUNTY",
+                     "nodeId": "S08", "rewardScore": 18, "active": True,
+                     "completed": False, "winnerPlayerId": 0}]
+    plan2 = st.planner.plan(gs2)
+    ok &= check("悬赏: 领先时不追（打了也不计分）", plan2.kind != "bounty", repr(plan2))
+
+    # ---- 悬赏 3: 到达相邻节点后，既有突破逻辑接管攻坚（复用 _breakthrough）----
+    gs3 = base_state(cur="S06", my_score=600, opp_score=700)
+    gs3.nodes["S08"]["guard"] = {"ownerTeamId": "BLUE", "defense": 4,
+                                 "maxDefense": 6, "active": True}
+    a = PlannerStrategy().main_action(gs3, Plan("bounty", position="S08", slack=200))
+    ok &= check("悬赏: 到相邻节点自动转交攻坚破卡",
+                a and a["action"] == "BREAK_GUARD" and a["targetNodeId"] == "S08",
+                str(a))
+
+    # ---- 情报 1: 排队等对手处理本站时，顺手用情报标自己这站(距离0) ----
+    gs = base_state(cur="S02", resources={"INTEL": 1})
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["currentProcess"] = {"targetNodeId": "S02", "action": "PROCESS"}
+    plan = st.planner.plan(gs)
+    a = PlannerStrategy().main_action(gs, plan)
+    ok &= check("情报: 排队空转帧顺手标记本站",
+                a and a["action"] == "USE_RESOURCE" and a["resourceType"] == "INTEL"
+                and a.get("targetNodeId") == "S02", str(a))
+
+    # ---- 情报 2: 手里没有情报时，同样的局面老实 WAIT（不假装有资源） ----
+    gs = base_state(cur="S02", resources={})
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["currentProcess"] = {"targetNodeId": "S02", "action": "PROCESS"}
+    plan = st.planner.plan(gs)
+    a = PlannerStrategy().main_action(gs, plan)
+    ok &= check("情报: 没情报就老实 WAIT", a == {"action": "WAIT"}, str(a))
+
+    # ---- 文书 1: 顺路领取过所（充实 YAN_DIE 出牌池） ----
+    gs = base_state(cur="S03", resources={})
+    gs.nodes["S03"]["resourceStock"] = {"PASS_TOKEN": 1}
+    plan = st.planner.plan(gs)
+    a = PlannerStrategy().main_action(gs, plan)
+    ok &= check("文书: 顺路领过所",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == "PASS_TOKEN", str(a))
+
+    # ---- 远程清障 1: 路上非 T04 障碍派小分队清，不用主车队绕路/自己 CLEAR ----
+    # 处理站帧数已计入寻路惩罚（V3.1），S01->S14 的惩罚后最短路实际走
+    # S01-S06-S08-S10-S11-S12-S13-S14（绕开 S02/S04/S05/S09 的固定处理），
+    # 障碍要挂在这条真实路径上才会被撞见，S08 正好在路上
+    gs = base_state(cur="S01")
+    gs.nodes["S08"]["hasObstacle"] = True
+    a = PlannerStrategy().squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("远程清障: 路上非T04障碍派小分队",
+                a == {"action": "SQUAD_CLEAR", "targetNodeId": "S08"}, str(a))
+
+    # ---- 远程清障 2: 同一障碍若是我们自己在做的 T04 目标，绝不能碰 ----
+    gs = base_state(cur="S01")
+    gs.nodes["S08"]["hasObstacle"] = True
+    t04_plan = Plan("task", task={"taskTemplateId": "T04"}, position="S01", slack=200)
+    a = PlannerStrategy().squad_action(gs, t04_plan)
+    ok &= check("远程清障: 自己的T04目标绝不代劳清障",
+                a is None or a.get("action") != "SQUAD_CLEAR", str(a))
+
+    # ---- 续防 1: 落后时给风化中的自家设卡续防守值 ----
+    gs = base_state(cur="S13", my_score=600, opp_score=700)
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": "RED", "defense": 2,
+                                "maxDefense": 6, "active": True}
+    for p in gs.players.values():
+        if p["playerId"] != 1001:  # S09->S10 = 56 帧，落在续防的 ETA 窗口内
+            p.update(currentNodeId="S09", nextNodeId=None, routeEdgeId=None)
+    st2 = PlannerStrategy()
+    st2._guard_sent = {"S10": 1}
+    a = st2.squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("续防: 落后时给自家风化中的卡续命",
+                a == {"action": "SQUAD_REINFORCE", "targetNodeId": "S10"}, str(a))
+
+    # ---- 续防 2: 领先时不续——别把卡续到悬赏触发线上送对手追分分 ----
+    gs = base_state(cur="S13", my_score=700, opp_score=600)
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": "RED", "defense": 2,
+                                "maxDefense": 6, "active": True}
+    for p in gs.players.values():
+        if p["playerId"] != 1001:  # S09->S10 = 56 帧，落在续防的 ETA 窗口内
+            p.update(currentNodeId="S09", nextNodeId=None, routeEdgeId=None)
+    st3 = PlannerStrategy()
+    st3._guard_sent = {"S10": 1}
+    a = st3.squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("续防: 领先时不续（无主动撤卡手段，只能不主动养大悬赏敞口）",
+                a is None, str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1566,6 +1742,7 @@ def main():
     ok &= test_tempo_guard()
     ok &= test_replay25()
     ok &= test_tail_farm()
+    ok &= test_latent_mechanics()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

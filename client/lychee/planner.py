@@ -66,6 +66,14 @@ WEATHER_FRESH_REGION = {("HEAVY_RAIN", P.WATER): 1.3}
 BACKTRACK_PENALTY = 25
 BACKTRACK_WINDOW = 40
 
+# 破关悬赏（V3.12）：只在落后时追（任务书 6.3.3——攻破方总分需低于设卡方才计分，
+# 领先时打了也白打）。只追一击必破的目标（好果坏果各至多 2 篓的单次攻坚上限），
+# 车轮战式蹲点强拆留给"挡路时顺手打"的既有逻辑，不在这里专程绕路。
+BOUNTY_GOOD_RESERVE = 5     # 与 strategy.PlannerStrategy.MIN_GOOD_RESERVE 保持一致
+BOUNTY_MAX_DEFENSE = 2 * 2 + 2 * 3   # 好果2*2 + 坏果2*3 的单次攻坚上限
+# rewardScore 直接读公开字段，不叠加"首次悬赏+20"的完成加成——该加成是否已经
+# 计入 bountyScore 展示口径不确定，宁可低估，不要在悬赏值上叠加一个可能重复计算的假设
+
 
 def milestone_bonus(base):
     if base >= 110:
@@ -167,11 +175,60 @@ class TaskPlanner:
             if net > best_net:
                 best_net, best = net, ("resource", None, node_id, rtype)
 
+        # 悬赏目标：只在落后时同台竞价（追分专用，见 6.3.3）
+        for node_id, net in self._bounty_targets(
+                state, cur, to_gate, slack, speed, penalty, ecost):
+            if net > best_net:
+                best_net, best = net, ("bounty", None, node_id, None)
+
         if best:
             kind, t, pos, rtype = best
             return Plan(kind, t, pos, slack=slack, resource=rtype,
                         detail=f"net={best_net:.0f} base={base}")
         return Plan("deliver", detail=f"no worthy task, base={base}", slack=slack)
+
+    # ================= 破关悬赏估值（V3.12） =================
+
+    def _bounty_targets(self, state, cur, to_gate, slack, speed, penalty, ecost):
+        """挂在敌方有效设卡上、落后时值得专程绕路攻破的悬赏：[(nodeId, 净收益)]。
+
+        目标节点就是设卡节点本身；实际攻坚由 strategy._breakthrough 在到达其
+        相邻节点时触发（攻坚破卡规则要求站在相邻节点，不进入目标节点，见 6.3.1），
+        这里的寻路会自然在最后一跳撞见 enemy_guard() 并转交给突破逻辑，无需特殊处理。
+        """
+        if not state.is_behind():
+            return []
+        me = state.me
+        good = me.get("goodFruit", 0) or 0
+        bad = me.get("badFruit", 0) or 0
+        max_gf = min(2, max(0, good - BOUNTY_GOOD_RESERVE))
+        max_bf = min(2, bad)
+        max_defense = max_gf * 2 + max_bf * 3
+        if max_defense <= 0:
+            return []
+        g = state.graph
+        out = []
+        for b in state.enemy_bounties():
+            node_id = b.get("nodeId")
+            if node_id == cur:
+                continue
+            guard = state.enemy_guard(node_id)
+            defense = guard.get("defense", 0) or 0
+            if defense <= 0 or defense > max_defense:
+                continue  # 打不穿就不专程绕路，避免多轮车轮战的不确定性
+            f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
+            if not path:
+                continue
+            f_back, back = g.shortest_path(node_id, state.gate_node, speed, penalty, ecost)
+            if not back:
+                continue
+            detour = max(0, f_to + f_back - to_gate)
+            if self._time_detour(state, cur, node_id) > slack:
+                continue  # 硬约束用时间口径，不能耽误交付
+            net = (b.get("rewardScore") or 0) - detour * self._frame_value(state, to_gate)
+            if net > 0:
+                out.append((node_id, net))
+        return out
 
     # ================= 资源提货估值 =================
 

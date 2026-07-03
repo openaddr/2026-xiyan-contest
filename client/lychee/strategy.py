@@ -160,7 +160,10 @@ class PlannerStrategy(BaselineStrategy):
     SCOUT_RESEND_GAP = 25       # 同一目标探路重发间隔（防止在途期间重复派人）
     SCOUT_MAX_ETA = 40          # 只探 40 帧内能赶到的目标（标记寿命 45 帧）
     GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
-    CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)  # 顺路领取清单
+    # 顺路领取清单：冰鉴/马之外补上文书（充实验牒 YAN_DIE 出牌池，克强行 QIANG_XING，
+    # 此前从不主动领导致这张克制牌常年打不出）和情报（免费囤着，等空转帧顺手用掉）
+    CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE,
+                      P.PASS_TOKEN, P.OFFICIAL_PERMIT, P.INTEL)
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
     USE_ICE_BELOW = 91          # 鲜度 ≤90 就用冰鉴：+10 不溢出，且防跌破转坏阈值
 
@@ -194,6 +197,16 @@ class PlannerStrategy(BaselineStrategy):
     LOITER_BASE_CAP = 110       # 任务基础分达到该值后不再蹲（末档里程碑已到手）
     LOITER_BUDGET = 50          # 整局蹲刷总预算（帧），有限下注
 
+    # ---- 情报（INTEL，V3.12）----
+    INTEL_DISTANCE_LIMIT = 15   # 任务书 3.3.4：目标距离超过 15 时使用被拒
+
+    # ---- 小分队远程清障（V3.12）----
+    SQUAD_CLEAR_RESEND_GAP = 18   # 落地延迟上限 15 帧 + 余量，防重复派人
+
+    # ---- 小分队增援（V3.12）----
+    REINFORCE_DEFENSE_FLOOR = 4    # 自家设卡防守值跌破该值才续
+    REINFORCE_RESEND_GAP = 30      # 同一节点续防重试间隔
+
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
@@ -208,6 +221,8 @@ class PlannerStrategy(BaselineStrategy):
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
         self._opp_guards_seen = False    # 对手本局是否设过卡（陷阱风险的证据门）
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
+        self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
+        self._reinforce_sent = {}        # nodeId -> 小分队增援派出帧（防重试风暴）
 
     # ---------- 每帧入口 ----------
 
@@ -332,10 +347,18 @@ class PlannerStrategy(BaselineStrategy):
                                          me.get("routeEdgeId"), alt)
                     self._stall = (None, None, 0)
                     return P.a_move(alt)
-            # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）。
+            # 移动中只能用马类资源或疾行令：没有移动增益就顺手上马（不耽误本帧推进）。
             # 马匹经济：T06 类任务要消耗整匹马，留足预留量才骑（详见 planner）
             res = me.get("resources") or {}
             if not state.has_move_buff():
+                # 终局急策三选一（V3.12）：截止吃紧的追分局，速度比护果令/破关令更值钱
+                # ——疾行令 15 帧内+30%速度，是唯一能在 MOVING 中提交的急策，不必等到
+                # 停靠再选（任务书 8.2：MOVING 状态允许马类资源和疾行令）
+                if (state.phase == P.PHASE_RUSH and plan is not None and plan.slack < 0
+                        and (me.get("rushTacticUsedCount") or 0) == 0
+                        and not self._rush_tactic_tried):
+                    self._rush_tactic_tried = True
+                    return P.a_rush_speed()
                 reserve = self.planner.horses_reserved(state)
                 total = res.get(P.FAST_HORSE, 0) + res.get(P.SHORT_HORSE, 0)
                 if total > reserve:
@@ -361,14 +384,19 @@ class PlannerStrategy(BaselineStrategy):
                 return P.a_deliver()
             return P.a_wait()
 
-        # 宫门验核（仅 RUSH）；验核前一帧先打护果令（免费，终段鲜度损耗 ×0.2）
+        # 宫门验核（仅 RUSH）；验核前先在三选一终局急策里挑一个用（V3.12：不再
+        # 硬编码护果令——坏果 >=2 时破关令绑验核近乎免费（验核 6→3 帧），
+        # 优先于要烧鲜度损耗才见效的护果令；都不划算才回落护果令）
         if cur == gate and not verified and plan.kind == "deliver":
             if state.phase == P.PHASE_RUSH:
-                if (me.get("rushTacticUsedCount") or 0) == 0 \
-                        and not self._rush_tactic_tried \
-                        and me.get("freshness", 0) < 100:
+                if (me.get("rushTacticUsedCount") or 0) == 0 and not self._rush_tactic_tried:
                     self._rush_tactic_tried = True
-                    return P.a_rush_protect()
+                    bad = me.get("badFruit", 0) or 0
+                    good = me.get("goodFruit", 0) or 0
+                    if bad >= 2 or good > self.MIN_GOOD_RESERVE:
+                        return P.a_verify_gate(break_order=True)
+                    if me.get("freshness", 0) < 100:
+                        return P.a_rush_protect()
                 return P.a_verify_gate()
             return P.a_wait()
 
@@ -382,7 +410,7 @@ class PlannerStrategy(BaselineStrategy):
                          and node.get("processRound", 0) > 0)
         if needs_process and not self._processed_here:
             if self._opp_processing_here(state, cur):
-                return P.a_wait()   # 对手已在处理本站流程：排队，不白挨拒绝
+                return self._idle_upgrade(state, plan)  # 排队等对手处理完，顺手用情报
             return P.a_process()
 
         # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）。
@@ -418,16 +446,22 @@ class PlannerStrategy(BaselineStrategy):
         # 尾段蹲刷（V3.10）：没有值得做的目标且余量充足时，站在任务候选点
         # 上等刷新 —— 刷出的任务下一帧就会被 plan 接住（同点零绕路必中）
         if plan.kind == "deliver" and self._should_loiter(state, plan, cur):
+            return self._idle_upgrade(state, plan)
+
+        # 悬赏目标已被清算/我们已到位（极罕见：到达同帧悬赏刚好失效），交给下一帧重新规划
+        if plan.kind == "bounty" and cur == plan.position:
             return P.a_wait()
 
-        # 赶路：任务点 / 资源点 / 宫门 / 终点
-        target = plan.position if plan.kind in ("task", "resource") \
+        # 赶路：任务点 / 资源点 / 悬赏目标 / 宫门 / 终点
+        # 悬赏目标就是敌方设卡节点本身，寻路会在最后一跳撞见 enemy_guard() 并
+        # 自动转交 _breakthrough（攻坚破卡规则要求站在相邻节点，不进入目标节点）
+        target = plan.position if plan.kind in ("task", "resource", "bounty") \
             else (terminal if verified else gate)
         if target == cur:
             return P.a_wait()
         nxt = self._route_next_hop(state, cur, target)
         if nxt is None:
-            return P.a_wait()
+            return self._idle_upgrade(state, plan)
         if state.has_obstacle(nxt) and not state.enemy_guard(nxt):
             if me.get("goodFruit", 0) > 1:
                 return P.a_clear(nxt)
@@ -437,9 +471,9 @@ class PlannerStrategy(BaselineStrategy):
         if self._opp_setting_guard(state, nxt):
             # 对手正在下一跳读条设卡：此时上边会在半路被冻结（边上不能攻坚），
             # 等 1~4 帧卡成型后站在节点上攻坚拆掉再走，代价小一个数量级
-            return P.a_wait()
+            return self._idle_upgrade(state, plan)
         if self._mid_edge_trap_risk(state, cur, nxt, plan):
-            return P.a_wait()  # 防中边陷阱：等对手离开我们的下一跳再上边
+            return self._idle_upgrade(state, plan)  # 防中边陷阱：等对手离开我们的下一跳再上边
         return P.a_move(nxt)
 
     # ---------- 主动设卡（V3）----------
@@ -556,6 +590,41 @@ class PlannerStrategy(BaselineStrategy):
             return P.a_claim_resource(cur, P.ICE_BOX)
         return None
 
+    # ---------- 情报：空转帧顺手用（V3.12）----------
+    # 注定 WAIT 的帧（排队/防陷阱/蹲刷等）不占主车队移动时间，此时若手里有情报，
+    # 顺手标一个目标节点：效果与小分队探路相同（处理帧 -3，最低 2），但完全不占
+    # 人手，机会成本≈0——专程为它停下不划算，只在反正要空等的帧里用。
+
+    def _idle_upgrade(self, state, plan):
+        me = state.me
+        if (me.get("resources") or {}).get(P.INTEL, 0) <= 0:
+            return P.a_wait()
+        cur = me.get("currentNodeId")
+        if not cur:
+            return P.a_wait()  # 移动/边上不能用情报（任务书 3.3.4），只在停靠时机会成立
+
+        candidates = []
+        if plan and plan.kind == "task" and plan.position:
+            candidates.append(plan.position)
+        if not me.get("verified"):
+            candidates.append(state.gate_node)
+        node = state.node(cur)
+        # 正在等的原因如果是本站还没处理完，标自己这站对下一次处理直接有用；
+        # 否则不标 cur——它不需要处理时，情报只是被白白用掉
+        if (node.get("processType") and node.get("processType") != "VERIFY"
+                and node.get("processRound", 0) > 0 and not self._processed_here):
+            candidates.append(cur)
+
+        for target in candidates:
+            if not target:
+                continue
+            if self.planner._has_our_scout_mark(state, target):
+                continue
+            if state.graph.shortest_distance(cur, target) > self.INTEL_DISTANCE_LIMIT:
+                continue
+            return P.a_use_resource(P.INTEL, target)
+        return P.a_wait()
+
     # ---------- 突破敌方设卡 ----------
     # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
     # 优先级：攻坚(坏果优先,瞬发) > 小分队削弱后攻坚 > 强制通行(时间税<=50帧) > 等。
@@ -589,6 +658,11 @@ class PlannerStrategy(BaselineStrategy):
             forced_tax = min(40, 10 + defense * 5)
         can_weaken = state.phase != P.PHASE_RUSH \
             and self._squad_avail(state) >= dispatches * 2
+        # 悬赏本该是"强通不清卡拿不到悬赏分，该多容忍削弱几帧"的理由，但穷举
+        # 现有防守值上限（4/5/6/7）发现削弱耗时按 WEAKEN_RESEND_GAP=12 帧计，
+        # 在 can_weaken 成立的每种真实防守值下都已经跑赢强通税+10 的门槛——
+        # 加宽容忍度不会改变任何一次决策，是不会触发的死代码，因此不加这个闸门
+        # （人手不够时 can_weaken 本身就是 False，容忍度调宽也救不了）。
         if can_weaken and weaken_time <= forced_tax + 10:
             if state.round - self._weaken_sent.get(target, -999) >= self.WEAKEN_RESEND_GAP:
                 self._weaken_target = target  # squad_action 本帧发 SQUAD_WEAKEN
@@ -749,6 +823,75 @@ class PlannerStrategy(BaselineStrategy):
             self._scout_sent[t] = state.round
             self._squad_spent += 1
             return P.a_squad_scout(t)
+
+        # 续防自家设卡（V3.12）：只在落后时续——领先时故意不续，让快风化的卡
+        # 自然失效，别把它续到破关悬赏 30/60 帧的触发线上，被拆时反倒给
+        # 对手送追分分（悬赏只在攻破方总分更低时结算，见 6.3.3）
+        if avail >= 2:
+            reinforce_target = self._reinforce_opportunity(state)
+            if reinforce_target:
+                self._reinforce_sent[reinforce_target] = state.round
+                self._squad_spent += 2
+                return P.a_squad_reinforce(reinforce_target)
+
+        # 远程清障（V3.12）：路上有障碍挡着非 T04 目标时，派小分队清，主车队
+        # 不用绕路/停下来自己 CLEAR；绝不碰自己正在做的 T04 目标（那要靠
+        # CLAIM_TASK 才算数，小分队/CLEAR 清障只会让该 T04 失败且不重刷）
+        if avail >= 2:
+            clear_target = self._squad_clear_opportunity(state, plan)
+            if clear_target and state.round - self._clear_sent.get(
+                    clear_target, -999) >= self.SQUAD_CLEAR_RESEND_GAP:
+                self._clear_sent[clear_target] = state.round
+                self._squad_spent += 2
+                return P.a_squad_clear(clear_target)
+        return None
+
+    def _reinforce_opportunity(self, state):
+        """给自己还有效的设卡续防守值，仅在落后时（见上方注释的悬赏风险）。"""
+        if not state.is_behind():
+            return None
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        for node_id in self._guard_sent:
+            node = state.node(node_id)
+            g = node.get("guard")
+            if not g or g.get("ownerTeamId") != state.my_team:
+                continue
+            defense = g.get("defense", 0) or 0
+            if defense <= 0 or defense >= self.REINFORCE_DEFENSE_FLOOR:
+                continue
+            if state.round - self._reinforce_sent.get(node_id, -999) < self.REINFORCE_RESEND_GAP:
+                continue
+            opp_eta = self.planner._opp_eta(state, node_id)
+            if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
+                continue  # 对手已经绕开或还远得很，续了也是浪费人手
+            return node_id
+        return None
+
+    def _squad_clear_opportunity(self, state, plan):
+        """本队去任务/资源/终点路上被障碍挡住的下一个节点；没有则 None。
+
+        故意排除我们自己正在做的 T04：清障任务要靠 CLAIM_TASK 才算数，
+        小分队/CLEAR 清掉的话该 T04 直接失败，不会重刷替代任务（5.2）。
+        """
+        if plan is None or plan.kind not in ("task", "resource", "deliver"):
+            return None
+        if plan.kind == "task" and (plan.task or {}).get("taskTemplateId") == "T04":
+            return None
+        me = state.me
+        cur = me.get("currentNodeId") or me.get("nextNodeId")
+        if not cur:
+            return None
+        target = plan.position if plan.kind in ("task", "resource") else (
+            state.terminal_node if me.get("verified") else state.gate_node)
+        if not target or target == cur:
+            return None
+        _, path = state.graph.shortest_path(cur, target, state.my_speed(),
+                                            self.planner._penalty_fn(state))
+        for nid in path[1:]:
+            if state.has_obstacle(nid):
+                return nid
         return None
 
     def _reroute_from_edge(self, state, me, blocked_next):

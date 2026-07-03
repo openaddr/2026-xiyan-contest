@@ -182,6 +182,36 @@ class GameState:
             out.append((p.get("action"), p.get("errorCode")))
         return out
 
+    # ---- 悬赏与总分（追分判定，任务书 6.3.3） ----
+
+    def is_behind(self):
+        """本结算帧开始时，公开总分是否落后对手（破关悬赏结算的追分口径）。"""
+        opp = self.opp
+        if not opp:
+            return False
+        return (self.me.get("totalScore", 0) or 0) < (opp.get("totalScore", 0) or 0)
+
+    def bounty_for_node(self, node_id):
+        """目标节点当前生效（未完成、未过期）的悬赏；无则 None。"""
+        for b in self.bounties:
+            if b.get("nodeId") == node_id and b.get("active") and not b.get("completed"):
+                return b
+        return None
+
+    def enemy_bounties(self):
+        """挂在敌方仍然有效设卡上的悬赏：只有这类悬赏才轮到我方攻破拿分。
+
+        以 enemy_guard() 现场结果为准，不单独信任 bounty.ownerTeamId ——
+        悬赏失效跟着设卡失效走（6.3.3），设卡状态才是唯一真值。
+        """
+        out = []
+        for b in self.bounties:
+            if not b.get("active") or b.get("completed"):
+                continue
+            if self.enemy_guard(b.get("nodeId")):
+                out.append(b)
+        return out
+
     # ---- 任务 ----
 
     def claimable_tasks(self):
