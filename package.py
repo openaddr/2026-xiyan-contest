@@ -7,12 +7,30 @@ Windows 打包的两个坑，这里都处理：
   2. Windows 原生压缩不保存 Unix 可执行位 —— 直接在 zip 条目里写入 0755。
 """
 import os
+import re
 import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # 仓库根目录
 CLIENT = os.path.join(HERE, "client")               # 客户端源码目录
-OUT = os.path.join(HERE, "dist", "gameclient.zip")
+
+
+def _build_version():
+    """从 client/lychee/version.py 读 BUILD_VERSION（文件解析，避免 import 副作用）。"""
+    try:
+        with open(os.path.join(CLIENT, "lychee", "version.py"), encoding="utf-8") as f:
+            m = re.search(r'^BUILD_VERSION\s*=\s*["\']([^"\']+)["\']', f.read(), re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+# 文件名带版本号（如 gameclient-3.13-convergence.zip）；读不到版本则回退原名
+_ver = _build_version()
+OUT_NAME = f"gameclient-{_ver}.zip" if _ver else "gameclient.zip"
+OUT = os.path.join(HERE, "dist", OUT_NAME)
 
 # (打包路径[zip内相对根目录], 是否脚本[LF+755])
 INCLUDE_FILES = [
