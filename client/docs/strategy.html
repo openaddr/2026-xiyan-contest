@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.14-camper-counters)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.15-wait-doctrine)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.14-camper-counters</span>
-   · 147 项自测覆盖 · 生成于 2026-07-03</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.15-wait-doctrine</span>
+   · 152 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -448,10 +448,22 @@ bounties[]/totalScore/SQUAD_REINFORCE/SQUAD_CLEAR/INTEL/PASS_TOKEN/OFFICIAL_PERM
 攻坚→补卡→攻坚的喂饵循环、对峙 30 帧后硬闯 71 帧长边（r314 掐点冻 195 帧）。
 selftest 147 项全绿（+8：蹲点四例/对峙两例/拍分锁定三例…）；九局回放播种后逐帧零差异
 （三个新分支在语料历史里均无既往触发点，行为由 selftest 锁定）</td></tr>
+<tr><td><b>3.15 wait-doctrine</b></td><td><b>replay56（V3.14 实战首败）两项修复：
+①删对峙上限硬闯——30 帧上限在"对手正在赶来"场景是自杀按钮（汇聚窗口以对手到点自然收束，
+到点后离开=解除/设卡=突破梯队接管/干蹲=常驻豁免，硬闯没有任何分支比等待好），闸门整体过期删除，
+TRAP_WAIT_MAX 降级为日志告警阈值；
+②找回 V3.13 合并丢失的二审四修复（合并父提交停在 c70811d 前一格）：RUSH_SPEED/RUSH_PROTECT
+补进 MAIN_ACTION_TYPES（缺失导致 replay56 疾行令与自动补发的 MOVE 同帧双主动作全作废+急策名额锁死）、
+疾行令好果≥3 前置、宫门设卡 extra=1、宫门情报 355 帧时机门</b></td>
+<td>replay56（80:734 未交付）：r276 防陷阱正确等待，r305 上限到点硬闯 71 帧长边，
+对手 r310 到 S10、r314 起卡，冻至 r389 风化死卡；恢复后 r452 节点攻坚拆 S11 卡（V3.14 机制正常），
+终局 r600 定格 S14 差约 40 帧未验核——上限不硬闯即活（等 5 帧对手到点转常驻，突破梯队全程可用）。
+疾行令全场未生效（rushUsed=None 无提交无拒绝）由 MAIN_ACTION_TYPES 缺失取证。
+selftest 152 项全绿；九局回放播种后逐帧回归</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.14-camper-counters ·
-自测 <code>python3 selftest.py</code>（147 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.15-wait-doctrine ·
+自测 <code>python3 selftest.py</code>（152 项）</p>
 </div>
 
 <script>

@@ -6,4 +6,4 @@
   （曾发生打包用了旧代码：r91 骑马 + 冻结零削弱 = 一眼识破旧版）。
 """
 # 3.13 = 3.12-choke-discipline（体检修复）+ 3.12-latent-mechanics（零引用机制）合流
-BUILD_VERSION = "3.14-camper-counters"
+BUILD_VERSION = "3.15-wait-doctrine"

@@ -196,7 +196,8 @@ class PlannerStrategy(BaselineStrategy):
     # 零交付）；地形门已把误伤压到每局 ≤1 次咽喉等待（≤30 帧 ≈ 6.6 分），
     # 对比冻结 180+ 帧 / 零交付 500 分级，陷阱概率 ≥5% 即回本 → 删证据门。
     TRAP_GUARD_FRAMES = 4       # 设卡读条帧数（对手到点后需要的成卡时间）
-    TRAP_WAIT_MAX = 30          # 防对手赖着不走的对峙上限（帧）
+    TRAP_WAIT_MAX = 30          # 陷阱等待的日志告警阈值（V3.15 起不再硬闯：
+                                # replay56 上限到点硬闯 71 帧长边被 r314 掐点冻死）
     # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
     # （等待成本 10~30 帧 vs 冻结成本 180+ 帧），对峙上限已兜底防赖
 
@@ -774,8 +775,8 @@ class PlannerStrategy(BaselineStrategy):
         # V3.12 删证据门：V3.9 曾要求"对手本局设过卡"才等待，但首卡必然
         # 没有前科（replay36: 2614 全场第一张卡 r314 掐在我们上边后，几何+
         # 地形全中仍被放行，冻 195 帧零交付）。replay27 型误伤由地形门兜底：
-        # 三段罚站中两段目标是普通驿站，本就不该等；剩余咽喉段误伤上限
-        # TRAP_WAIT_MAX（30 帧 ≈ 6.6 分）<< 冻结 180+ 帧。
+        # 三段罚站中两段目标是普通驿站，本就不该等；剩余咽喉段误伤上界
+        # 为对手真实停留时长 << 冻结 180+ 帧。
         # 地形门：实战陷阱只发生在咽喉类节点（S10/S11），普通驿站不设防
         if state.node(nxt).get("nodeType") not in self.GUARD_NODE_TYPES:
             return give_up()
@@ -795,20 +796,23 @@ class PlannerStrategy(BaselineStrategy):
 
         if not risk:
             return give_up()
-        # 防赖着不走的对峙：同一节点连续等待超过上限就硬闯。
-        # 上限只适用于"正在赶来"的汇聚窗口（转瞬即逝，等它过去就安全）；
-        # 对手常驻在下一跳上时不硬闯（V3.14）——设卡读条只要 4 帧，比任何
-        # 边都短，我们一上边它随手起卡就是必冻（replay36：对峙后硬闯 71 帧
-        # 长边，r314 被掐点，冻 195 帧未交付）。站在节点上等，所有手段
-        # （攻坚/强通/改道/空转用情报）都还在；它要赢也必须动身去交付。
+        # V3.15 删对峙上限硬闯（闸门过期复盘）：V3.5 的 30 帧上限防的是
+        # "对手赖着不走白耗我们"，但两类风险场景它都给错答案——
+        # · 汇聚中（replay56 直接死因）：r276 起等待，r305 上限到点硬闯 71 帧
+        #   长边，对手 r310 到 S10、r314 起卡，冻到 r389，终局差 40 帧未交付。
+        #   汇聚窗口以对手到点自然收束（≤~70 帧且逐帧递减），到点后要么离开
+        #   （风险解除）、要么设卡（enemy_guard 分支接管，节点上攻坚/强通全可用）、
+        #   要么干蹲（转入下面的常驻情形）——硬闯没有任何一个分支比等待好；
+        # · 常驻蹲点（V3.14 已豁免）：设卡读条 4 帧比任何边都短，上边即必冻。
+        # 等待期间不是干等：空转帧用情报、它要赢也必须动身去交付。
+        # 误伤上界 = 对手真实停留时长（地形门已把范围压到咽喉节点），
+        # 语料实测蹲点者停留 ~30 帧 << 冻结 180+ 帧 / 未交付 500 分级。
         node, n = self._trap_wait
         n = n + 1 if node == nxt else 1
         self._trap_wait = (nxt, n)
-        if n > self.TRAP_WAIT_MAX and not camped:
-            if self.log:
-                self.log.info("trap standoff at %s exceeded %d frames, pushing",
-                              nxt, self.TRAP_WAIT_MAX)
-            return False
+        if self.log and n in (self.TRAP_WAIT_MAX, self.TRAP_WAIT_MAX * 3):
+            self.log.info("trap wait at %s reached %d frames (opp %s)",
+                          nxt, n, "camped" if camped else "converging")
         return True
 
     # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------

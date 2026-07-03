@@ -1261,7 +1261,7 @@ def test_trap_proof():
 
     # 0) V3.12 删证据门回归：对手从未设卡，但它占着我们的咽喉下一跳 →
     #    照样等待。首卡必然没有前科（replay36: 2614 全场首卡掐上边冻 195 帧
-    #    零交付），误伤上限 TRAP_WAIT_MAX 30 帧 << 冻结 180+ 帧
+    #    零交付），误伤上界为对手真实停留时长 << 冻结 180+ 帧
     a = PlannerStrategy().main_action(gs_tail())
     ok &= check("防陷阱: 首卡也设防(无前科照等)",
                 a and a["action"] == "WAIT", str(a))
@@ -1310,14 +1310,17 @@ def test_trap_proof():
     ok &= check("防陷阱: 蹲点者常驻下一跳永不硬闯",
                 last and last["action"] == "WAIT", str(last))
 
-    # 5b) 对手只是"正在赶来"（汇聚窗口转瞬即逝）→ 超限后照旧硬闯，不陪它耗
+    # 5b) 对手"正在赶来"同样不硬闯（V3.15 删对峙上限——replay56 直接死因：
+    #     r305 上限到点硬闯 71 帧长边，对手 r310 到点 r314 起卡冻死）。
+    #     汇聚窗口以对手到点自然收束：到点后离开→风险解除（用例 3）、
+    #     设卡→enemy_guard 分支接管（用例 4）、干蹲→常驻情形（用例 5a）
     st = PlannerStrategy()
     last = None
-    for i in range(35):
+    for i in range(40):
         last = st.main_action(
             gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07", round_no=380 + i))
-    ok &= check("防陷阱: 汇聚窗口对峙超限后硬闯",
-                last and last["action"] == "MOVE", str(last))
+    ok &= check("防陷阱: 汇聚中超过旧上限仍不硬闯",
+                last and last["action"] == "WAIT", str(last))
 
     # 6) 截止吃紧也不赌：slack 越紧冻结越致命（等待 10~30 帧 vs 冻结 180+ 帧）
     a = PlannerStrategy().main_action(gs_tail(round_no=545))
