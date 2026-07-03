@@ -6,4 +6,6 @@
   （曾发生打包用了旧代码：r91 骑马 + 冻结零削弱 = 一眼识破旧版）。
 """
 # 3.13 = 3.12-choke-discipline（体检修复）+ 3.12-latent-mechanics（零引用机制）合流
-BUILD_VERSION = "3.13-convergence"
+# 3.13g = 3.13-convergence + glm 战术层（T04优先/PASS必胜/固定站探路）
+#         + trap-wait 不 cap 赶来对手 + ambush 设卡冻边中段对手
+BUILD_VERSION = "3.13g-ambush"
