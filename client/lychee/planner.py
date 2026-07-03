@@ -66,6 +66,31 @@ WEATHER_FRESH_REGION = {("HEAVY_RAIN", P.WATER): 1.3}
 BACKTRACK_PENALTY = 25
 BACKTRACK_WINDOW = 40
 
+# 漏斗定价（V3.16）：全图汇于关键关隘（武关 S10 类），谁后到谁挨卡。
+# 对手先到时，我们过漏斗的真实代价随"到达时机"剧烈变化（replay57/60 实测）：
+# - 赶在它到位前过完边：0（设卡必须人到，规则 6.2.1 免疫）
+# - 到得太早（它还没到，但我们抢不完边）：死等它到位+设卡，再吃满防强通税
+#   （replay36/56/57：山路正好撞进这个窗口，死等 21~52 帧 + 税 45+）
+# - 它刚过就跟上：满防税 45 + 窗口摊销（replay60 水路：死等 0）
+# - 来得很晚：卡已风化，税逐级递减甚至为 0
+# 所有数字来自规则：读条 4 帧、KEY_PASS 满防首次风化 45 帧、之后每 30 帧 -1、
+# 税 min(50, 15+5×防守)。唯一近似：对手 ETA 用裸帧（不含它的途中停留），
+# 已在语料上验证方向正确（57 山路 vs 60 水路的实付代价排序一致）。
+FUNNEL_GUARD_READ = 4
+FUNNEL_FIRST_WEATHER = 45
+FUNNEL_WEATHER_GAP = 30
+FUNNEL_WINDOW_OVERHEAD = 8      # 强通 PASS 窗口 + 可能的休整摊销
+FUNNEL_GUARD_PRIOR = 0.7        # 首卡出现前的先验（语料 6/11 局走廊领跑者卡漏斗，
+                                # L4 系 demo 5/5；见过对手设卡后升为 1.0）
+# 差值截断只作用于"税差"部分（税依赖对手是否真设卡，有模型不确定性）；
+# "死等差"部分不截断——它是纯几何：到得早又抢不完边就必须等卡出生
+# （规则 6.2.1 + 防冻结天条推导，与对手意愿无关）
+FUNNEL_TAX_DELTA_CAP = 30.0
+# 竞速不确定带：过边完成时刻与对手到位时刻差在 ±15 帧内时按线性概率折算
+# ——开局双方等距（出口≈t_o）本质是五五开（S02 窗口决定），二值判定会让
+# 模型坐在边界上被浮点抖动摆布，把开局所有小目标一刀切杀掉
+FUNNEL_RACE_BAND = 15.0
+
 # 破关悬赏（V3.12）：只在落后时追（任务书 6.3.3——攻破方总分需低于设卡方才计分，
 # 领先时打了也白打）。只追一击必破的目标（好果坏果各至多 2 篓的单次攻坚上限），
 # 车轮战式蹲点强拆留给"挡路时顺手打"的既有逻辑，不在这里专程绕路。
@@ -125,6 +150,8 @@ class TaskPlanner:
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
+        self._guard_seen = False       # 对手本局设过卡（漏斗先验升为 1.0，粘性）
+        self._funnel_cache = (None, None)  # ((round, cur), (choke, t_o, prior, toll_direct))
         # 回头迟滞（V3.8）：刚离开的节点在窗口期内作为目标首跳要付额外代价。
         # replay25：走廊总价近似打平让 65 帧真实折返在绕路公式里"免费"，
         # S03→S02→S04 的回头使我们晚 70 帧到 S09，正好撞上对手设卡循环。
@@ -186,6 +213,119 @@ class TaskPlanner:
             return Plan(kind, t, pos, slack=slack, resource=rtype,
                         detail=f"net={best_net:.0f} base={base}")
         return Plan("deliver", detail=f"no worthy task, base={base}", slack=slack)
+
+    # ================= 漏斗定价（V3.16） =================
+
+    def _funnel_ctx(self, state, cur, penalty=None, ecost=None):
+        """本帧漏斗上下文：(choke, 对手到位帧 t_o, 先验, 直达路的漏斗代价)。
+
+        选路用价值口径（车队真实会走的路——裸最短路在本图是山线，会把
+        官道候选冤枉成"绕路"），计时统一用裸边帧与对手 ETA 同度量。
+        对手已交付/退赛或不可达时无漏斗威胁，返回 None。按 (round, cur) 缓存。
+        """
+        key = (state.round, cur)
+        if self._funnel_cache[0] == key:
+            return self._funnel_cache[1]
+        ctx = None
+        opp = state.opp
+        if opp and not opp.get("delivered") and not opp.get("retired"):
+            if not self._guard_seen:
+                for node in state.nodes.values():
+                    gd = node.get("guard")
+                    if gd and gd.get("active") and \
+                            gd.get("ownerTeamId") not in (None, state.my_team):
+                        self._guard_seen = True
+                        break
+            _, path = state.graph.shortest_path(cur, state.gate_node, 1000,
+                                                penalty, ecost)
+            choke = next((n for n in (path or [])[1:]
+                          if state.node(n).get("nodeType") == "KEY_PASS"), None)
+            if choke:
+                oe = self._opp_eta(state, choke)
+                if oe != math.inf:
+                    t_o = state.round + oe
+                    prior = 1.0 if self._guard_seen else FUNNEL_GUARD_PRIOR
+                    toll_direct = self._funnel_toll(
+                        state, choke, t_o, path, state.round)
+                    ctx = (choke, t_o, prior, toll_direct)
+        self._funnel_cache = (key, ctx)
+        return ctx
+
+    @staticmethod
+    def _raw_walk_frames(state, path):
+        """沿 path 的裸帧耗时（基准速度，与对手 ETA 同度量）。"""
+        g = state.graph
+        t, prev = 0.0, path[0]
+        for nb in path[1:]:
+            edge = g.edge_between(prev, nb)
+            t += g.edge_frames(edge, P.BASE_SPEED) if edge else 0.0
+            prev = nb
+        return t
+
+    @staticmethod
+    def _funnel_toll(state, choke, t_o, path, t_start):
+        """沿裸最短路 path、t_start 出发，过 choke 的期望代价 (死等帧, 税帧)。
+
+        时间口径与 t_o 一致：裸边帧（基准速度、不含途中停留），双方同一度量。
+        """
+        if not path or choke not in path[1:]:
+            return 0.0, 0.0
+        g = state.graph
+        t = float(t_start)
+        prev = path[0]
+        for nb in path[1:]:
+            edge = g.edge_between(prev, nb)
+            ef = g.edge_frames(edge, P.BASE_SPEED) if edge else 0.0
+            if nb == choke:
+                exit_t = t + ef
+                # 竞速概率：出口早于 t_o−带宽 = 稳赢免疫；晚于 +带宽 = 稳输全额
+                p_lose = min(1.0, max(0.0, (exit_t - (t_o - FUNNEL_RACE_BAND))
+                                      / (2 * FUNNEL_RACE_BAND)))
+                if p_lose <= 0:
+                    return 0.0, 0.0  # 赶在对手到位前过完边：规则免疫（6.2.1）
+                guard_up = t_o + FUNNEL_GUARD_READ
+                # 死等只在稳输（p=1）时计费：竞速带内的"死等"本质是 S02 窗口式
+                # 五五开，对各候选近似对称、在差值里相消，带内计它只会放大
+                # 到达估计噪声（±2 帧的出发差被斜坡放大成 ±5 帧期望费）
+                dead = max(0.0, guard_up - t) if p_lose >= 1.0 else 0.0
+                age = max(0.0, t + dead - guard_up)
+                if age < FUNNEL_FIRST_WEATHER:
+                    defense = 6
+                else:
+                    defense = max(0, 5 - int((age - FUNNEL_FIRST_WEATHER)
+                                             // FUNNEL_WEATHER_GAP))
+                if defense <= 0:
+                    return dead, 0.0
+                tax = min(50, 15 + 5 * defense)
+                return dead, (tax + FUNNEL_WINDOW_OVERHEAD) * p_lose
+            t += ef
+            prev = nb
+        return 0.0, 0.0
+
+    def _funnel_delta(self, state, cur, pos, proc, penalty=None, ecost=None):
+        """经 pos 绕路相对直达路的漏斗代价差（帧，可负=晚到躲税/躲死等）。
+
+        死等差不截断（纯几何）；税差截断 ±FUNNEL_TAX_DELTA_CAP（依赖对手行为）。
+        """
+        ctx = self._funnel_ctx(state, cur, penalty, ecost)
+        if not ctx:
+            return 0.0
+        choke, t_o, prior, toll_direct = ctx
+        g = state.graph
+        _, p1 = g.shortest_path(cur, pos, 1000, penalty, ecost)
+        _, p2 = g.shortest_path(pos, state.gate_node, 1000, penalty, ecost)
+        if not p1 or not p2:
+            return 0.0
+        if choke in p1[1:]:
+            via = self._funnel_toll(state, choke, t_o, p1, state.round)
+        else:
+            via = self._funnel_toll(
+                state, choke, t_o, p2,
+                state.round + self._raw_walk_frames(state, p1) + proc)
+        d_dead = via[0] - toll_direct[0]
+        d_tax = max(-FUNNEL_TAX_DELTA_CAP,
+                    min(FUNNEL_TAX_DELTA_CAP, via[1] - toll_direct[1]))
+        return (d_dead + d_tax) * prior
 
     # ================= 破关悬赏估值（V3.12） =================
 
@@ -344,6 +484,9 @@ class TaskPlanner:
                         if nb in opp_path:
                             val2 = val2 * DENIAL_FACTOR
                         chain += CHAIN_WEIGHT * val2 * d2
+                # 资源不计漏斗差（V3.16）：资源面值 ≤19，漏斗模型在竞速带附近
+                # 的到达估计噪声（±2 帧出发差 → ±40 帧期望费）会淹没它们；
+                # 路线级灾难（36/56/57 山路口袋）全部由任务链驱动，任务侧计价足够
                 net = v + chain - detour * self._frame_value(state, to_gate)
                 if net > 0:
                     out.append((node_id, rtype, net))
@@ -419,7 +562,12 @@ class TaskPlanner:
             bundle, bframes = 0.0, 0  # 余量装不下捆绑就只按裸任务估
 
         cost = (total_frames + bframes) * self._frame_value(state, eta_direct)
-        net = value + bundle - cost
+        # 漏斗定价（V3.16）：绕路改变到达关键关隘的时机，死等/满防税/躲税
+        # 的差额计入净值（replay57 山路死等+满税 vs replay60 水路零死等半税）
+        funnel = self._funnel_delta(state, cur, pos, proc + bframes,
+                                    penalty, ecost) \
+            * self._frame_value(state, eta_direct)
+        net = value + bundle - cost - funnel
         return (net, pos) if net > 0 else None
 
     def _position_for(self, state, task, cur, speed, penalty, ecost=None):

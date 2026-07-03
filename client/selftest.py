@@ -342,7 +342,7 @@ def test_planner():
         cards = {st.pick_card(gs, contests[0]) for _ in range(30)}
         ok &= check("窗口: 出牌均为可负担合法牌",
                     cards <= {P.CARD_BING_ZHENG, P.CARD_XIAN_GONG,
-                              P.CARD_YAN_DIE, P.CARD_ABSTAIN} and len(cards) >= 2,
+                              P.CARD_YAN_DIE, P.CARD_ABSTAIN} and len(cards) >= 1,
                     f"cards={sorted(cards)}")
 
     # ---- 场景5: 已验核后规划为 deliver ----
@@ -401,17 +401,21 @@ def test_contention():
     a = PlannerStrategy().main_action(gs)
     ok &= check("错峰: 对手读条中我方排队", a["action"] == "WAIT", str(a))
 
-    # ---- 混合出牌：镜像局面下出牌有随机性，不再恒定同一张 ----
+    # ---- best-response 出牌（V3.16）：镜像局面主打期望最优牌，留少量混合防死锁 ----
     random.seed(42)
     gs = mirror_state(1001, 44)
     contest = {"contestId": "C_X", "contestType": "DOCK",
                "redPlayerId": 1001, "bluePlayerId": 2002}
     st = PlannerStrategy()
-    picks = [st.pick_card(gs, contest) for _ in range(60)]
+    picks = [st.pick_card(gs, contest) for _ in range(200)]
     distinct = set(picks)
-    ok &= check("出牌: 混合策略出现多种牌", len(distinct) >= 2, f"{sorted(distinct)}")
-    ok &= check("出牌: 弃权不占主导", picks.count(P.CARD_ABSTAIN) < 20,
-                f"abstain={picks.count(P.CARD_ABSTAIN)}/60")
+    # 镜像开局对手池 {弃权,兵争,献贡}：献贡胜弃权+兵争、仅平献贡 → 期望最优
+    ok &= check("出牌: 镜像局主打期望最优的献贡",
+                picks.count(P.CARD_XIAN_GONG) > 120,
+                f"xian={picks.count(P.CARD_XIAN_GONG)}/200")
+    ok &= check("出牌: 保留混合防镜像死锁", len(distinct) >= 2, f"{sorted(distinct)}")
+    ok &= check("出牌: 弃权不占主导", picks.count(P.CARD_ABSTAIN) < 40,
+                f"abstain={picks.count(P.CARD_ABSTAIN)}/200")
     ok &= check("出牌: 全部为合法牌",
                 distinct <= {P.CARD_YAN_DIE, P.CARD_QIANG_XING, P.CARD_XIAN_GONG,
                              P.CARD_BING_ZHENG, P.CARD_ABSTAIN})
@@ -544,23 +548,23 @@ def test_breakthrough():
                          routeEdgeId=None, delivered=False, retired=False)
         return gs
 
-    # 7) 卡主在场：攻坚试探不超过 CAMPER_BREAK_LIMIT 次，超限转强制通行
+    # 7) 卡主在场且补得起卡（语料 5/5 拆掉即补满）：不试探，直接强通
     #    （强通税窗口创建时锁定、之后补卡不计入、通行不可冻结——6.3.2）
-    st = PlannerStrategy()
-    st._breaks_sent["S10"] = st.CAMPER_BREAK_LIMIT
-    a = st.decide(camped_state(defense=6, bad=2))
-    ok &= check("突破: 蹲点补卡循环证实后转强通",
+    a = PlannerStrategy().decide(camped_state(defense=6, bad=2))
+    ok &= check("突破: 蹲点者补得起卡直接强通（免试探）",
                 any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
                     for x in a)
                 and not any(x["action"] == "BREAK_GUARD" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 8) 卡主在场但还没试探过：仍允许攻坚（它可能随时离开，第一拆是便宜的信息）
-    st = PlannerStrategy()
-    a = st.decide(camped_state(defense=6, bad=2))
-    ok &= check("突破: 蹲点首拆仍试探（未证实循环前不放弃攻坚）",
-                any(x["action"] == "BREAK_GUARD" for x in a)
-                and st._breaks_sent.get("S10") == 1,
+    # 8) 卡主在场但好果见底（关键关隘补卡底价 1 好果都掏不出）：放心攻坚
+    gs = camped_state(defense=6, bad=2)
+    for p_ in gs.players.values():
+        if p_["playerId"] != 1001:
+            p_["goodFruit"] = 0
+    a = PlannerStrategy().decide(gs)
+    ok &= check("突破: 蹲点者补不起卡则放心攻坚",
+                any(x["action"] == "BREAK_GUARD" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # 9) 卡主在场且果品不够破：不派削弱喂饵（与中边冻结分支同一纪律），
@@ -571,12 +575,11 @@ def test_breakthrough():
                 and any(x["action"] == "FORCED_PASS" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 10) 蹲点+超限+强通被规则禁止（上次强通到达点）→ 老实等它离开
+    # 10) 蹲点+强通被规则禁止（上次强通到达点）→ 老实等它离开
     st = PlannerStrategy()
-    st._breaks_sent["S10"] = st.CAMPER_BREAK_LIMIT
     st._last_forced_node = "S10"
     a = st.decide(camped_state(defense=6, bad=2))
-    ok &= check("突破: 蹲点超限且强通被禁则等待",
+    ok &= check("突破: 蹲点且强通被禁则等待",
                 not any(x["action"] in ("BREAK_GUARD", "FORCED_PASS") for x in a),
                 json.dumps(a, ensure_ascii=False))
     return ok

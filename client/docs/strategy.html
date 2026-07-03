@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.15-wait-doctrine)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.16-funnel-doctrine)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.15-wait-doctrine</span>
-   · 157 项自测覆盖 · 生成于 2026-07-03</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.16-funnel-doctrine</span>
+   · 158 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -388,6 +388,9 @@
 <tr><td>MIN_GOOD_RESERVE 好果底仓</td><td>5 篓</td><td>交付要求好果 &gt; 0，对抗投资不许掏空</td></tr>
 <tr><td>CAMPER_BREAK_LIMIT 蹲点攻坚试探上限（V3.14）</td><td>2 次</td><td>每轮攻坚 ~2好果+1坏果≈4分 vs 对手原地补卡 ≤3 好果；语料蹲点停留 ~30 帧 ≈ 2 个攻坚周期，覆盖"它正要走"，再多是给补卡循环送果，超限转强通（税锁定不可冻，6.3.2）</td></tr>
 <tr><td>SQUAD_CORRIDOR_RESERVE 走廊人手底仓（V3.15）</td><td>4 人手</td><td>= 2 次削弱 = 防 6 削到好果可拆；过验核前探路（0.7分）/续防/清障不许击穿底仓，削弱本身不受限；对手已交付或我方已验核后解除（replay20/56：人手买穿后走廊第二张卡只能干等风化）</td></tr>
+<tr><td>漏斗定价（V3.16）</td><td>读条4 / 首风化45 / 每30帧−1 / 税 min(50,15+5d)+窗口8 / 先验 0.7→见卡 1.0 / 竞速带 ±15 / 税差截断 ±30</td><td>任务估值按到达关键关隘时机计费：免疫/死等+满税/风化减税三段（replay57 vs 60 实付代价排序验证）；仅任务侧，资源面值小被噪声淹没</td></tr>
+<tr><td>出牌 best-response（V3.16）</td><td>赌注 PASS/GATE 10 · TASK 8 · DOCK 6 · RESOURCE 3；平手带 0.4；软混合 15%</td><td>对手可负担牌集全公开可推；PASS 是强通生死拍；混合防镜像平局死锁</td></tr>
+<tr><td>情报预热（V3.16）</td><td>读条 ≥4 帧的站/宫门，无本队标记时先上情报</td><td>−3 帧读条换 1 帧使用净省 2；尾段 S11/S13/S14 三站 ≈ 6 帧（57 局差 8 帧未交付的主要补偿）</td></tr>
 <tr><td>攻坚成本权重</td><td>好果 1.9 / 坏果 0.1</td><td>好果值 1.8 分/篓 + 平分决胜价值；坏果近乎废物</td></tr>
 <tr><td>SCOUT_MAX_ETA / GATE_SCOUT_FROM</td><td>40 帧 / 第 355 帧</td><td>标记寿命 45 帧；宫门验核最早 ~390 开放（曾浪费 6/8 人手在过期标记上）</td></tr>
 <tr><td>SCOUT/WEAKEN 重发间隔</td><td>25 / 12 帧</td><td>在途落地延迟 3~15 帧，防重复派人；V3.12 起中边冻结分支同样受 12 帧间隔约束（曾 3 帧连发烧光 6 人手）</td></tr>
@@ -464,10 +467,25 @@ TRAP_WAIT_MAX 降级为日志告警阈值；
 终局 r600 定格 S14 差约 40 帧未验核——上限不硬闯即活（等 5 帧对手到点转常驻，突破梯队全程可用）。
 疾行令全场未生效（rushUsed=None 无提交无拒绝）由 MAIN_ACTION_TYPES 缺失取证。
 selftest 152 项全绿；九局回放播种后逐帧回归</td></tr>
+<tr><td><b>3.16 funnel-doctrine</b></td><td><b>四局连败（57/58/59 山路差 8 帧未交付、60 水路只输 9 分）取证后的大修：
+①漏斗定价——任务估值按"到达关键关隘的时机"计费：赶在对手到位前过完边=免疫（6.2.1），
+撞进新鲜卡窗口=死等+满防税，晚到=风化减税；全部参数出自规则（读条4/首风化45/每30帧-1/税公式），
+竞速带 ±15 帧内按概率折算、死等仅在稳输时计费、只作用于任务（资源面值小被到达噪声淹没）；
+②出牌 best-response——对手可负担牌集由公开字段精确推出（文书/护卫点/鲜度好果/马类增益），
+按对象赌注加权的期望胜拍选牌，保留 15% 软混合防镜像死锁，修正"任何出牌胜弃权"的拍分语义；
+③情报预热——读条 ≥4 帧的站点/宫门验核前先花 1 帧上情报（-3 净省 2），宫门探路被
+RUSH 禁派+45 帧标记寿命两头卡死后这是唯一的验核减帧手段（57 局验核 r592 完成差 8 帧未交付，
+S11+S13+S14 三处预热 = 6 帧正是胜负帧）；
+④蹲点免试探——卡主在场且补得起卡（语料 5/5 拆掉即补满）直接强通，省 2好果+1坏果+12 帧</b></td>
+<td>57/58/59 三局逐帧相同（demo 确定性）：V3.15 防御全部按设计工作（S08 节点等待 47 帧、
+试探 r315、补卡 r322、强通 r327-443、r444 拆 S11 卡、r461 疾行令）仍差 8 帧；
+60 局引擎因 S06 冰缺货偶然走水路即交付 729:738。漏斗账本：山路死等 52+税 45+长边 71 出关 r443，
+水路死等 0+税 45+短边 55 出关 r409（倒贴 68 帧折返仍早 34 帧）。
+selftest 158 项全绿；九局回放回归：非出牌差异全部为既有人手预留压制，开局画像零漂移</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.15-wait-doctrine ·
-自测 <code>python3 selftest.py</code>（157 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.16-funnel-doctrine ·
+自测 <code>python3 selftest.py</code>（158 项）</p>
 </div>
 
 <script>

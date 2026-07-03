@@ -173,10 +173,6 @@ class PlannerStrategy(BaselineStrategy):
 
     MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
-    # 蹲点补卡的攻坚试探上限（V3.14）：每轮攻坚 ~2好果+1坏果 ≈ 4 分，对手
-    # 原地补卡 ≤3 好果；语料中蹲点者停留 ~30 帧 ≈ 2 个攻坚周期，2 次试探
-    # 覆盖"它正要离开"的情形，再多就是在给它的补卡循环送果
-    CAMPER_BREAK_LIMIT = 2
 
     # ---- 主动设卡（V3）----
     GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE"}  # 咽喉类节点
@@ -229,7 +225,6 @@ class PlannerStrategy(BaselineStrategy):
         self._scout_sent = {}   # nodeId -> 派出帧
         self._rush_tactic_tried = False  # 护果令只尝试一次，被拒也不无限重试
         self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
-        self._breaks_sent = {}  # nodeId -> 攻坚次数（识别蹲点补卡循环）
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
         self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
@@ -393,6 +388,13 @@ class PlannerStrategy(BaselineStrategy):
         # 优先于要烧鲜度损耗才见效的护果令；都不划算才回落护果令）
         if cur == gate and not verified and plan.kind == "deliver":
             if state.phase == P.PHASE_RUSH:
+                # 情报预热（V3.16）：花 1 帧上情报，验核 6→3，净省 2 帧——
+                # replay57 验核 r592 完成、差 ~8 帧未交付，这 2 帧就是胜负帧。
+                # 宫门探路在实战永远发不出去（RUSH 禁派 + 标记 45 帧寿命卡死
+                # 提前派的窗口），情报是唯一能给验核减帧的手段
+                warm = self._intel_prewarm(state, cur, 6)
+                if warm:
+                    return warm
                 if (me.get("rushTacticUsedCount") or 0) == 0 and not self._rush_tactic_tried:
                     self._rush_tactic_tried = True
                     bad = me.get("badFruit", 0) or 0
@@ -416,6 +418,10 @@ class PlannerStrategy(BaselineStrategy):
         if needs_process and not self._processed_here:
             if self._opp_processing_here(state, cur):
                 return self._idle_upgrade(state, plan)  # 排队等对手处理完，顺手用情报
+            # 情报预热（V3.16）：读条 ≥4 帧的站先花 1 帧上情报（-3 净省 2）
+            warm = self._intel_prewarm(state, cur, node.get("processRound", 0))
+            if warm:
+                return warm
             return P.a_process()
 
         # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）。
@@ -637,33 +643,35 @@ class PlannerStrategy(BaselineStrategy):
     # ---------- 突破敌方设卡 ----------
     # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
     # 优先级：攻坚(坏果优先,瞬发) > 小分队削弱后攻坚 > 强制通行(时间税<=50帧) > 等。
-    # 蹲点例外（V3.14）：卡主停靠在卡节点上时，它 ≤3 好果 4 帧就能原地补卡，
-    # 攻坚/削弱都是喂饵。给攻坚留 CAMPER_BREAK_LIMIT 次试探（对手可能随时离开，
-    # replay36 蹲点者 30 帧后就走了），超过即认定补卡循环，转强制通行——
-    # 时间税在窗口创建时一次锁定、之后补卡不计入、通行不可冻结（任务书 6.3.2），
-    # 是对蹲点补卡唯一有界的解。
+    # 蹲点例外（V3.14，V3.16 免试探）：卡主停靠在卡节点上且补得起卡（关键关隘/
+    # 宫门底价 1 好果，普通节点免费）时，攻坚/削弱都是喂饵——语料 5/5 局
+    # （36/56/57/58/59）拆掉即被原地补满，试探从未成功过，每次白送 2 好果 +
+    # 1 坏果 + ~12 帧。直接强制通行：时间税在窗口创建时一次锁定、之后补卡
+    # 不计入、通行不可冻结（任务书 6.3.2），是对蹲点补卡唯一有界的解。
+    # 它补不起卡（好果见底）时才放心攻坚。
 
     def _breakthrough(self, state, target, plan):
         me = state.me
         g = state.enemy_guard(target)
         defense = g.get("defense", 0) or 0
 
-        # 蹲点补卡循环已证实（我们拆过、卡又立起来、卡主还在）：停止喂饵
-        if self._opp_at_node(state, target) \
-                and self._breaks_sent.get(target, 0) >= self.CAMPER_BREAK_LIMIT:
-            if target != self._last_forced_node:
-                if self.log:
-                    self.log.info("camper at %s re-guarded after %d breaks, "
-                                  "forced pass", target, self._breaks_sent[target])
-                return P.a_forced_pass(target)
-            return P.a_wait()
+        if self._opp_at_node(state, target):
+            base = 1 if state.node(target).get("nodeType") in ("KEY_PASS", "GATE") else 0
+            can_reguard = (state.opp.get("goodFruit", 0) or 0) >= max(1, base) \
+                if base else True
+            if can_reguard:
+                if target != self._last_forced_node:
+                    if self.log:
+                        self.log.info("camper holds %s (can re-guard), forced pass",
+                                      target)
+                    return P.a_forced_pass(target)
+                return P.a_wait()
 
         # 1) 一击必破：攻坚值 = 好果x2 + 坏果x3，投入各最多 2 篓，无读条
         invest = self._break_invest(defense, me.get("goodFruit", 0),
                                     me.get("badFruit", 0))
         if invest:
             gf, bf = invest
-            self._breaks_sent[target] = self._breaks_sent.get(target, 0) + 1
             if self.log:
                 self.log.info("break guard %s def=%d with good=%d bad=%d",
                               target, defense, gf, bf)
@@ -747,6 +755,18 @@ class PlannerStrategy(BaselineStrategy):
         return bool(opp and not opp.get("delivered") and not opp.get("retired")
                     and not opp.get("routeEdgeId")
                     and opp.get("currentNodeId") == node_id)
+
+    def _intel_prewarm(self, state, target, proc_frames):
+        """处理/验核前先上情报（读条 -3，最低 2）：读条 ≥4 帧净省 ≥1。
+
+        目标就是脚下节点（距离 0，满足 3.3.4 的 ≤15 限制）；已有本队
+        标记时不重复。"""
+        res = state.me.get("resources") or {}
+        if res.get(P.INTEL, 0) <= 0 or (proc_frames or 0) < 4:
+            return None
+        if self.planner._has_our_scout_mark(state, target):
+            return None
+        return P.a_use_resource(P.INTEL, target)
 
     @staticmethod
     def _opp_processing_here(state, node_id):
@@ -975,45 +995,96 @@ class PlannerStrategy(BaselineStrategy):
             return contest.get("redPoint", 0) or 0, contest.get("bluePoint", 0) or 0
         return 0, 0
 
-    def pick_card(self, state, contest):
-        """混合策略出牌：可负担的牌按强度加权随机。
+    # 窗口对象的赌注权重（分级）：赢/输一拍对不同对象的价值差异巨大——
+    # PASS 是我们强通的生死拍（输=通行失败+休整重试），GATE/TASK 直接挂着
+    # 验核先手/30 分任务，RESOURCE 输了不过是少 17 分里的一部分
+    CONTEST_STAKE = {P.CONTEST_PASS: 10.0, P.CONTEST_GATE: 10.0,
+                     P.CONTEST_TASK: 8.0, P.CONTEST_DOCK: 6.0,
+                     P.CONTEST_OBSTACLE: 5.0, P.CONTEST_RESOURCE: 3.0}
+    CARD_TIE_EPS = 0.4      # 期望值差在此以内视为平手，随机选（防镜像平局链）
+    CARD_MIX_RATE = 0.15    # 少量混合：纯 best-response 对镜像会锁死同牌平局
 
-        确定性出牌遇到同水平对手会陷入平局链（休整 3 帧 + 抑制 18 帧，
-        镜像对局曾因此双双 0 分锁死在 S02）。加权随机让平局概率降到
-        每拍 ~30% 以下，2~3 拍内大概率分出胜负。
+    @staticmethod
+    def _opp_card_pool(state):
+        """对手本拍可负担的牌集（全部来自公开字段）——它出牌只会从这里选。"""
+        opp = state.opp or {}
+        res = opp.get("resources") or {}
+        pool = [P.CARD_ABSTAIN]
+        buffs = {(b.get("type") or b.get("buffType")) for b in opp.get("buffs") or []}
+        if buffs & {"FAST_HORSE", "SHORT_HORSE", "RUSH_SPEED"} \
+                or res.get(P.FAST_HORSE, 0) + res.get(P.SHORT_HORSE, 0) > 0:
+            pool.append(P.CARD_QIANG_XING)
+        if (opp.get("guardActionPoint") or 0) > 0:
+            pool.append(P.CARD_BING_ZHENG)
+        if opp.get("freshness", 0) >= 80 and opp.get("goodFruit", 0) >= 1:
+            pool.append(P.CARD_XIAN_GONG)
+        if res.get(P.PASS_TOKEN, 0) + res.get(P.OFFICIAL_PERMIT, 0) > 0:
+            pool.append(P.CARD_YAN_DIE)
+        return pool
+
+    def pick_card(self, state, contest):
+        """出牌 best-response（V3.16）：对手手牌全公开，别再盲盒加权。
+
+        对手本拍可负担的牌集可由公开字段精确算出（文书/护卫点/鲜度好果/
+        马类增益），按"对其可负担集均匀出牌"求各牌期望胜拍，再按对象赌注
+        加权、减自身出牌成本，取最优。期望值打平（±CARD_TIE_EPS）时随机、
+        另留 CARD_MIX_RATE 概率按软权重混合——纯确定性 best-response 对
+        镜像对手会锁死同牌平局链（休整 3 帧 + 抑制 18 帧，曾双双 0 分）。
         """
         me = state.me
         res = me.get("resources") or {}
         ctype = contest.get("contestType")
 
-        # 拍分数学锁定即弃权（V3.14）：窗口共 3 个计分拍，先到 2 分胜负已定
-        # ——2:0 进第三拍时对手最多追到 1，出什么都不改结果（replay36：
-        # 对手三拍全弃权，我们 2:0 后第三张献贡纯白烧 1 好果）；0:2 同理，
-        # 认负省牌
+        # 拍分数学锁定即弃权（V3.14）：三拍两胜，先到 2 分胜负已定
         mine, theirs = self._contest_points(state, contest)
         if mine >= 2 or theirs >= 2:
             return P.CARD_ABSTAIN
 
-        options = []  # (牌, 权重)
+        # (牌, 成本折分)：成本 = 消耗资源的机会价值
+        my_options = [(P.CARD_ABSTAIN, 0.0)]
         if state.has_move_buff():
-            options.append((P.CARD_QIANG_XING, 3.0))   # 增益期免费
+            my_options.append((P.CARD_QIANG_XING, 0.0))   # 增益期免费
         if (me.get("guardActionPoint") or 0) > 0:
-            options.append((P.CARD_BING_ZHENG, 3.0))   # 克验牒/强行，无其他用途
+            my_options.append((P.CARD_BING_ZHENG, 0.1))   # 护卫点无其他用途
         if me.get("freshness", 0) >= 80 and me.get("goodFruit", 0) > 2:
-            options.append((P.CARD_XIAN_GONG, 2.0))    # 克验牒/兵争，费 1 好果
+            my_options.append((P.CARD_XIAN_GONG, 1.9))    # 1 好果
         if res.get(P.PASS_TOKEN, 0) + res.get(P.OFFICIAL_PERMIT, 0) > 0:
-            options.append((P.CARD_YAN_DIE, 1.5))      # 克强行，文书暂无他用
-        if not options:
-            return P.CARD_ABSTAIN
+            my_options.append((P.CARD_YAN_DIE, 0.4))      # 文书暂无他用
 
-        # 低价值对象（顺手抢的资源）多混弃权省成本；关键对象少弃权
-        abstain_w = 1.5 if ctype == P.CONTEST_RESOURCE else 0.5
-        options.append((P.CARD_ABSTAIN, abstain_w))
+        pool = self._opp_card_pool(state)
+        stake = self.CONTEST_STAKE.get(ctype, 5.0)
 
-        total = sum(w for _, w in options)
-        pick = random.random() * total
-        for card, w in options:
-            pick -= w
-            if pick <= 0:
-                return card
-        return options[-1][0]
+        def beat(a, b):
+            """a 对 b 的拍分：任何出牌胜弃权（5.4.5），其余按克制表。"""
+            if a == b:
+                return 0
+            if b == P.CARD_ABSTAIN:
+                return 1
+            if a == P.CARD_ABSTAIN:
+                return -1
+            if b in P.CARD_BEATS.get(a, ()):
+                return 1
+            if a in P.CARD_BEATS.get(b, ()):
+                return -1
+            return 0
+
+        scored = []
+        for card, cost in my_options:
+            ev = sum(beat(card, oc) for oc in pool) / len(pool) * stake - cost
+            scored.append((ev, card))
+        scored.sort(key=lambda x: -x[0])
+
+        if random.random() < self.CARD_MIX_RATE:
+            # 软权重混合（EV 平移到正区间），保留对镜像的不可预测性
+            floor_ = min(ev for ev, _ in scored)
+            weights = [(ev - floor_ + 0.5, card) for ev, card in scored]
+            total = sum(w for w, _ in weights)
+            pick = random.random() * total
+            for w, card in weights:
+                pick -= w
+                if pick <= 0:
+                    return card
+            return weights[-1][1]
+        best_ev = scored[0][0]
+        ties = [card for ev, card in scored if best_ev - ev <= self.CARD_TIE_EPS]
+        return random.choice(ties)
