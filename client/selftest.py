@@ -548,13 +548,27 @@ def test_breakthrough():
                          routeEdgeId=None, delivered=False, retired=False)
         return gs
 
-    # 7) 卡主在场且补得起卡（语料 5/5 拆掉即补满）：不试探，直接强通
-    #    （强通税窗口创建时锁定、之后补卡不计入、通行不可冻结——6.3.2）
-    a = PlannerStrategy().decide(camped_state(defense=6, bad=2))
-    ok &= check("突破: 蹲点者补得起卡直接强通（免试探）",
+    # 7) 卡主在场且补得起卡：先给 CAMPER_GRACE 帧宽限（语料 6/6 它读完临别卡
+    #    次帧就走），赖着不走才认定真蹲点转强通（免试探——拆掉即被补满）
+    st = PlannerStrategy()
+    a = None
+    for i in range(st.CAMPER_GRACE + 2):
+        a = st.decide(camped_state(defense=6, bad=2, round_no=330 + i))
+    ok &= check("突破: 蹲点者赖过宽限窗后直接强通（免试探）",
                 any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
                     for x in a)
                 and not any(x["action"] == "BREAK_GUARD" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 7b) 临别卡宽限：卡主在宽限窗内离开 → 站在节点上白菜价攻坚
+    #     （reports 局实锤：S10 本可 2好果+1坏果秒拆，实付 117 帧强通）
+    st = PlannerStrategy()
+    st.decide(camped_state(defense=6, bad=2, round_no=330))   # 宽限第 1 帧：等
+    gs2 = blocked_state(defense=6, bad=2, round_no=332)       # 它走了（不在 S10）
+    a = st.decide(gs2)
+    ok &= check("突破: 宽限窗内卡主离开则节点攻坚",
+                any(x["action"] == "BREAK_GUARD" and x["targetNodeId"] == "S10"
+                    for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # 8) 卡主在场但好果见底（关键关隘补卡底价 1 好果都掏不出）：放心攻坚
@@ -568,9 +582,12 @@ def test_breakthrough():
                 json.dumps(a, ensure_ascii=False))
 
     # 9) 卡主在场且果品不够破：不派削弱喂饵（与中边冻结分支同一纪律），
-    #    直接强通兜底
-    a = PlannerStrategy().decide(camped_state(defense=6, bad=0, round_no=200))
-    ok &= check("突破: 卡主在场不削弱直接强通",
+    #    宽限后直接强通兜底
+    st = PlannerStrategy()
+    a = None
+    for i in range(st.CAMPER_GRACE + 2):
+        a = st.decide(camped_state(defense=6, bad=0, round_no=200 + i))
+    ok &= check("突破: 卡主在场不削弱宽限后强通",
                 not any(x["action"] == "SQUAD_WEAKEN" for x in a)
                 and any(x["action"] == "FORCED_PASS" for x in a),
                 json.dumps(a, ensure_ascii=False))
@@ -578,7 +595,9 @@ def test_breakthrough():
     # 10) 蹲点+强通被规则禁止（上次强通到达点）→ 老实等它离开
     st = PlannerStrategy()
     st._last_forced_node = "S10"
-    a = st.decide(camped_state(defense=6, bad=2))
+    a = None
+    for i in range(st.CAMPER_GRACE + 2):
+        a = st.decide(camped_state(defense=6, bad=2, round_no=330 + i))
     ok &= check("突破: 蹲点且强通被禁则等待",
                 not any(x["action"] in ("BREAK_GUARD", "FORCED_PASS") for x in a),
                 json.dumps(a, ensure_ascii=False))
@@ -1552,14 +1571,28 @@ def test_replay25():
                 and not any(x["action"] == "FORCED_PASS" for x in acts),
                 json.dumps(acts, ensure_ascii=False))
 
-    # 5) 人手不足 → 强通兜底不变
+    # 5) 削到能拆即止（V3.17）：坏果 0 时好果攻坚上限 4，防 6 只需削 1 次
+    #    到防 4 —— 2 人手足够（reports 局：人手 5 被"削到 0 要 6 人手"拒掉，
+    #    白吃 70 帧强通税）
     gs = base_gs("S09", "S12", round_no=520, squad=2, bad=0)
     for n in gs.nodes.values():
         if n["nodeId"] == "S10":
             n["guard"] = {"ownerTeamId": "BLUE", "defense": 6,
                           "maxDefense": 7, "active": True}
+    acts = PlannerStrategy().decide(gs)
+    ok &= check("突破: 削到能拆即止（2 人手削防6卡）",
+                any(x["action"] == "SQUAD_WEAKEN" for x in acts)
+                and not any(x["action"] == "FORCED_PASS" for x in acts),
+                json.dumps(acts, ensure_ascii=False))
+
+    # 5b) 人手 1（连一次削弱都不够）→ 强通兜底不变
+    gs = base_gs("S09", "S12", round_no=520, squad=1, bad=0)
+    for n in gs.nodes.values():
+        if n["nodeId"] == "S10":
+            n["guard"] = {"ownerTeamId": "BLUE", "defense": 6,
+                          "maxDefense": 7, "active": True}
     a = PlannerStrategy().main_action(gs)
-    ok &= check("突破: 人手不足仍强通兜底",
+    ok &= check("突破: 人手见底仍强通兜底",
                 a and a["action"] == "FORCED_PASS", str(a))
     return ok
 

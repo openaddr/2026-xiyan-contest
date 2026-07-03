@@ -225,6 +225,7 @@ class PlannerStrategy(BaselineStrategy):
         self._scout_sent = {}   # nodeId -> 派出帧
         self._rush_tactic_tried = False  # 护果令只尝试一次，被拒也不无限重试
         self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
+        self._guard_first_seen = {}  # nodeId -> 首见该敌卡的帧（临别卡宽限计时）
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
         self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
@@ -286,6 +287,11 @@ class PlannerStrategy(BaselineStrategy):
             self.planner.back_node = prev_station
             self.planner.back_until = state.round + 40
         self._weaken_target = None
+
+        # 敌卡消失（被拆/风化/失效）即重置宽限计时：同节点再立新卡重新起算
+        for node_id in list(self._guard_first_seen):
+            if not state.enemy_guard(node_id):
+                del self._guard_first_seen[node_id]
 
         for e in state.my_events("FORCED_PASS_END"):
             p = e.get("payload") or {}
@@ -649,6 +655,14 @@ class PlannerStrategy(BaselineStrategy):
     # 1 坏果 + ~12 帧。直接强制通行：时间税在窗口创建时一次锁定、之后补卡
     # 不计入、通行不可冻结（任务书 6.3.2），是对蹲点补卡唯一有界的解。
     # 它补不起卡（好果见底）时才放心攻坚。
+    # 临别卡宽限（V3.17）：语料 6/6 次"卡主在场"其实是它刚读完临别卡还没
+    # 迈步（2614: r314卡→r318走 / r322卡→r323走；2839: r309卡→r310走 /
+    # r450卡→r451走）——我们的强通总提交在它离开前的最后一帧，完美错过
+    # 次帧就能用的节点攻坚（reports 局 S10：本可 2好果+1坏果 秒拆，实付
+    # 117 帧强通）。新卡+卡主在场 → 先等 CAMPER_GRACE 帧看它走不走：
+    # 走了节点攻坚白菜价；赖着不走才是真蹲点，再走强通（多花 ≤8 帧）。
+
+    CAMPER_GRACE = 8
 
     def _breakthrough(self, state, target, plan):
         me = state.me
@@ -660,9 +674,12 @@ class PlannerStrategy(BaselineStrategy):
             can_reguard = (state.opp.get("goodFruit", 0) or 0) >= max(1, base) \
                 if base else True
             if can_reguard:
+                first = self._guard_first_seen.setdefault(target, state.round)
+                if state.round - first < self.CAMPER_GRACE:
+                    return self._idle_upgrade(state, plan)  # 宽限：等它迈步
                 if target != self._last_forced_node:
                     if self.log:
-                        self.log.info("camper holds %s (can re-guard), forced pass",
+                        self.log.info("camper holds %s past grace, forced pass",
                                       target)
                     return P.a_forced_pass(target)
                 return P.a_wait()
@@ -679,8 +696,14 @@ class PlannerStrategy(BaselineStrategy):
 
         # 2) 果品不够破：削弱 vs 强通按真实耗时选快的（V3.8：不再用 slack
         #    闸门 —— replay25 在 r325 因 slack<0 跳过削弱选了强通，吃了
-        #    100 帧税+路程，实际比削弱路径慢 20+ 帧且截止越紧越输不起）
-        dispatches = (defense + 1) // 2
+        #    100 帧税+路程，实际比削弱路径慢 20+ 帧且截止越紧越输不起）。
+        #    V3.17 削到能拆即止：坏果饥荒（鲜度管理好 → 全场坏果 0~1）下
+        #    好果攻坚上限只有 4，防 6 的卡按"削到 0"算要 3 次派遣 6 人手，
+        #    reports 局人手剩 5 被拒转强通白吃 70 帧——其实削 1 次到防 4
+        #    就能 2 好果秒拆，2 人手足够
+        max_attack = min(2, max(0, me.get("goodFruit", 0) - self.MIN_GOOD_RESERVE)) * 2 \
+            + min(2, me.get("badFruit", 0) or 0) * 3
+        dispatches = max(1, -(-(defense - max_attack) // 2))  # 削到可拆的次数
         weaken_time = (dispatches - 1) * self.WEAKEN_RESEND_GAP + 8  # 落地延迟
         node_type = state.node(target).get("nodeType")
         if node_type == "KEY_PASS":
