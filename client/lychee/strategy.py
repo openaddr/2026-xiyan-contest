@@ -194,6 +194,7 @@ class PlannerStrategy(BaselineStrategy):
     EDGE_REROUTE_MIN_BLOCKED = 2    # 连续确认被卡后，才尝试主办方确认的边上换目标
     EDGE_REROUTE_MIN_DEFENSE = 4    # 防 1/2 小卡优先削弱，不绕大圈
     EDGE_REROUTE_MIN_SLACK = -80    # 绕三角是重税；只拦深度已死的交付预算
+    EDGE_BRANCH_ESCAPE_MAX_ROUND = 260  # S02->S03 早段被卡，无三角时改走水路分支
 
     # ---- 主动设卡（V3）----
     # 咽喉类节点 + 宫前驿（V3.28：2839 的二卡就落在 S13 PALACE_STATION，
@@ -298,6 +299,8 @@ class PlannerStrategy(BaselineStrategy):
     TRAP_AVOID_WINDOW = 120     # 改道承诺的有效窗口（帧），对手离开即提前解除
     TRAP_DEADLINE_ESCAPE_SLACK = -20
     TRAP_DEADLINE_ESCAPE_WAIT = 45
+    TRAP_S10_SIDE_WAIT = 30     # S09 对 S10 坐地户等满后，走 S08 侧翼试探
+    TRAP_SIDE_ENTRY_WINDOW = 180 # 侧翼承诺窗口，避免 S08 再次被同一 S10 等住
 
     # ---- 尾段蹲刷（V3.10）----
     # 任务刷新跟在车队身后：领跑者吃冰，跟随者吃刷新（29/30/31 三局对手
@@ -348,6 +351,7 @@ class PlannerStrategy(BaselineStrategy):
         self._own_guard_broken = {}      # nodeId -> 最近一次我方卡失效帧
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
         self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
+        self._trap_side_entry = (None, -1)  # (侧翼强入的咽喉节点, 承诺到期帧)
         self._edge_blocked = (None, 0)    # (边上被敌卡拒绝的目标, 连续帧数)
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
         self._window_draw_pressure = {}  # (target, type) -> (累计平局压力, 最近帧)
@@ -482,6 +486,15 @@ class PlannerStrategy(BaselineStrategy):
                         and opp.get("nextNodeId") != avoid))
             if state.round >= until or gone:
                 self._trap_avoid = (None, -1)
+        side, side_until = self._trap_side_entry
+        if side:
+            opp = state.opp
+            gone = (not opp or opp.get("delivered") or opp.get("retired")
+                    or (opp.get("currentNodeId") != side
+                        and opp.get("nextNodeId") != side))
+            if state.round >= side_until or state.me.get("currentNodeId") == side \
+                    or gone:
+                self._trap_side_entry = (None, -1)
 
         # 对手出牌画像（V3.18）：WINDOW_CARD_REVEAL 全公开，本局频率替代
         # "对可负担集均匀出牌"的先验（pick_card 拉普拉斯平滑加权）
@@ -767,6 +780,8 @@ class PlannerStrategy(BaselineStrategy):
                         and state.round - last_weaken >= self.WEAKEN_RESEND_GAP):
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
                 escape = self._edge_guard_escape(state, nxt, plan)
+                if not escape:
+                    escape = self._edge_branch_escape(state, nxt, plan)
                 if escape:
                     return P.a_move(escape)
                 return None
@@ -930,6 +945,10 @@ class PlannerStrategy(BaselineStrategy):
         if rescue:
             return P.a_claim_task(rescue["taskId"])
 
+        side_entry = self._s10_side_entry_idle(state, cur, plan)
+        if side_entry:
+            return P.a_move(side_entry)
+
         # 尾段蹲刷（V3.10）：没有值得做的目标且余量充足时，站在任务候选点
         # 上等刷新 —— 刷出的任务下一帧就会被 plan 接住（同点零绕路必中）
         if plan.kind == "deliver" and self._should_loiter(state, plan, cur):
@@ -967,6 +986,8 @@ class PlannerStrategy(BaselineStrategy):
             # 防中边陷阱：等对手离开我们的下一跳再上边。等待不是无价的——
             # 等够绕路差价后租买止损改道（V3.18），绕不开的真漏斗口继续等
             alt = self._trap_reroute(state, cur, nxt, target)
+            if not alt:
+                alt = self._s10_side_entry_reroute(state, cur, nxt, target, plan)
             if alt:
                 return P.a_move(alt)
             idle_wait = self.IDLE_TASK_TRAP_WAIT if (
@@ -1298,6 +1319,9 @@ class PlannerStrategy(BaselineStrategy):
         跟随者战术（V3.10.1 修正）：仅当对手在前方（或已交付）才蹲——
         领先时蹲刷等于把走廊节奏还给对手，对设卡型对手（2614）是自杀。
         """
+        side, side_until = self._trap_side_entry
+        if side and state.round < side_until:
+            return False
         if state.phase != P.PHASE_NORMAL or state.me.get("verified"):
             return False
         if self.planner.race_mode(state):
@@ -1481,6 +1505,49 @@ class PlannerStrategy(BaselineStrategy):
             if cost < best_cost:
                 best = alt
                 best_cost = cost
+        return best
+
+    def _edge_branch_escape(self, state, blocked, plan):
+        """早段分叉被卡后的换线逃生。
+
+        S02->S03 被临别卡冻住时没有"三角点"可回攻 S03；继续等风化会
+        复制 vs2735 的百帧冻结。这里只给开局 S03 关口一个保命门：确认
+        已连续被卡后，放弃 S03 官道入口，改走 S04 水路分支去宫门。
+        """
+        me = state.me
+        cur = me.get("currentNodeId")
+        if cur != "S02" or blocked != "S03":
+            return None
+        if state.round > self.EDGE_BRANCH_ESCAPE_MAX_ROUND:
+            return None
+        if self._edge_blocked[0] != blocked \
+                or self._edge_blocked[1] < self.EDGE_REROUTE_MIN_BLOCKED:
+            return None
+        if plan and plan.slack < self.EDGE_REROUTE_MIN_SLACK:
+            return None
+        target = state.terminal_node if me.get("verified") else state.gate_node
+        graph = state.graph
+        penalty = self.planner._penalty_fn(state)
+        ecost = self.planner._edge_cost_fn(state)
+        best = None
+        best_cost = math.inf
+        for alt, edge1 in graph.neighbors(cur):
+            if alt == blocked or state.is_blocked(alt):
+                continue
+
+            def avoid_pen(nid, _base=penalty, _blocked=blocked):
+                return _base(nid) + (self.TRAP_AVOID_PENALTY
+                                     if nid == _blocked else 0)
+
+            rest, path = graph.shortest_path(alt, target, state.my_speed(),
+                                             avoid_pen, ecost)
+            if not path or blocked in path:
+                continue
+            cost = graph.edge_frames(edge1, state.my_speed()) + rest
+            if cost < best_cost:
+                best, best_cost = alt, cost
+        if best:
+            self._trap_avoid = (blocked, state.round + self.TRAP_AVOID_WINDOW)
         return best
 
     # ---------- 情报：空转帧顺手用（V3.12）----------
@@ -1996,6 +2063,10 @@ class PlannerStrategy(BaselineStrategy):
 
         if not risk:
             return give_up()
+        side, side_until = self._trap_side_entry
+        if side == nxt and state.round < side_until and cur != "S09" \
+                and state.graph.edge_between(cur, nxt):
+            return give_up()
         # 普通节点驻扎的有界等待：蹲普通节点的是农夫不是狙击手（语料先验），
         # 但 2839 证明"站定普通汇入点掐踏边"存在——预算内等它走/起卡，
         # 耗尽硬闯。与咽喉的无界等待（V3.15 论断）刻意不同：咽喉蹲守者
@@ -2159,6 +2230,64 @@ class PlannerStrategy(BaselineStrategy):
         if state.round + our_edge < RUSH_EARLIEST - 3:
             return False
         return self.planner._can_break_expected_guard(state, nxt)
+
+    def _s10_side_entry_idle(self, state, cur, plan):
+        """S09 被 S10 身体墙拖住时，给侧翼逃生累计一个小等待预算。"""
+        if cur != "S09" or not plan or plan.kind != "deliver":
+            return None
+        if (state.me.get("taskScore", 0) or 0) >= self.S10_TOLL_BASE:
+            return None
+        if state.enemy_guard("S10") or self._opp_setting_guard(state, "S10"):
+            return None
+        opp = state.opp or {}
+        if opp.get("routeEdgeId") or opp.get("currentNodeId") != "S10":
+            return None
+        node, n = self._trap_wait
+        self._trap_wait = ("S10", n + 1 if node == "S10" else 1)
+        target = state.terminal_node if state.me.get("verified") else state.gate_node
+        return self._s10_side_entry_reroute(state, cur, "S10", target, plan)
+
+    def _s10_side_entry_reroute(self, state, cur, blocked, target, plan):
+        """S09 等 S10 坐地户太久时，改走 S08 侧翼。
+
+        新图 S10 是真漏斗，传统租买改道要求替代路径完全避开 S10，因此
+        永远不会触发；但实战里 S09->S08->S10 可以把"正面身体墙"改成
+        侧翼攻坚/强通窗口。只给 S09/S10 这一个形态，避免泛化回退。
+        """
+        if cur != "S09" or blocked != "S10":
+            return None
+        if not plan or plan.kind != "deliver":
+            return None
+        if (state.me.get("taskScore", 0) or 0) >= self.S10_TOLL_BASE:
+            return None
+        if plan.slack < self.EDGE_REROUTE_MIN_SLACK:
+            return None
+        if state.enemy_guard(blocked) or self._opp_setting_guard(state, blocked):
+            return None
+        opp = state.opp or {}
+        if opp.get("routeEdgeId") or opp.get("currentNodeId") != blocked:
+            return None
+        if not self._opp_can_guard(state, blocked):
+            return None
+        waited = self._trap_wait[1] if self._trap_wait[0] == blocked else 0
+        if waited < self.TRAP_S10_SIDE_WAIT:
+            return None
+        best = None
+        best_cost = math.inf
+        for alt, edge1 in state.graph.neighbors(cur):
+            if alt == blocked or state.is_blocked(alt):
+                continue
+            edge2 = state.graph.edge_between(alt, blocked)
+            if not edge2:
+                continue
+            cost = state.graph.edge_frames(edge1, state.my_speed()) \
+                + state.graph.edge_frames(edge2, state.my_speed())
+            if cost < best_cost:
+                best, best_cost = alt, cost
+        if best:
+            self._trap_side_entry = (blocked,
+                                     state.round + self.TRAP_SIDE_ENTRY_WINDOW)
+        return best
 
     def _ordinary_converge_threat(self, state):
         """普通节点收敛掐边只在设卡型/强推进信号下成立。"""

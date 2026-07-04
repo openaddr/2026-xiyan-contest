@@ -758,11 +758,12 @@ def test_edge_block():
         inquire = json.load(f)["msg_data"]
 
     def edge_state(guard_def=6, squad=6, opp_setting=False, on_edge=True,
-                   cur="S09", nxt="S10", edge_id="E05", rejected=False):
+                   cur="S09", nxt="S10", edge_id="E05", rejected=False,
+                   round_no=320):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
-        d["round"] = 320
+        d["round"] = round_no
         d["contests"], d["tasks"] = [], []
         d["events"] = []
         if rejected:
@@ -819,6 +820,17 @@ def test_edge_block():
                 json.dumps(a, ensure_ascii=False))
     ok &= check("边冻结: 改道同时保留削弱",
                 any(x["action"] == "SQUAD_WEAKEN" and x["targetNodeId"] == "S09"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 1c) S02->S03 早段被临别卡冻住时没有三角回攻点；确认连续被卡后，
+    #     放弃 S03 官道入口，改走 S04 水路分支保命。
+    st_branch = PlannerStrategy()
+    st_branch._edge_blocked = ("S03", 1)
+    a = st_branch.decide(edge_state(cur="S02", nxt="S03", edge_id="E02",
+                                    rejected=True, round_no=212))
+    ok &= check("边冻结: S03无三角时早段换水路分支",
+                any(x["action"] == "MOVE" and x["targetNodeId"] == "S04"
                     for x in a),
                 json.dumps(a, ensure_ascii=False))
 
@@ -1554,6 +1566,35 @@ def test_trap_proof():
         gs.on_inquire(d)
         return gs
 
+    def gs_s09_s10_camper(cur="S09", round_no=320):
+        """lose(6) vs2812: 我在 S09，S10 身体驻守，传统绕路绕不开 S10。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=90.0, goodFruit=96,
+                         badFruit=1, taskScore=105, squadAvailable=4,
+                         verified=False)
+            else:
+                p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False, goodFruit=94,
+                         badFruit=1, taskScore=60, squadAvailable=4)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
     # 0) V3.12 删证据门回归：对手从未设卡，但它占着我们的咽喉下一跳 →
     #    照样等待。首卡必然没有前科（replay36: 2614 全场首卡掐上边冻 195 帧
     #    零交付），误伤上界为对手真实停留时长 << 冻结 180+ 帧
@@ -1631,6 +1672,21 @@ def test_trap_proof():
         last = st.main_action(gs_tail(round_no=380 + i))
     ok &= check("防陷阱: 蹲点者常驻下一跳永不硬闯",
                 last and last["action"] == "WAIT", str(last))
+
+    # 5a2) 新图 S10 是真漏斗，传统租买要求完全绕开 S10 因而不触发；
+    #      S09 等够小预算后应先走 S08 侧翼，而不是等到 RUSH 才被迫改道。
+    st_side = PlannerStrategy()
+    st_side._trap_wait = ("S10", st_side.TRAP_S10_SIDE_WAIT)
+    a = st_side.main_action(gs_s09_s10_camper(), Plan("deliver", slack=120))
+    ok &= check("防陷阱: S09等S10坐地户后走S08侧翼",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S08",
+                str(a))
+    st_side._trap_side_entry = ("S10", 420)
+    a = st_side.main_action(gs_s09_s10_camper(cur="S08"),
+                            Plan("deliver", slack=120))
+    ok &= check("防陷阱: S08侧翼承诺后不再二次罚站",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
 
     # 5b) 对手"正在赶来"同样不硬闯（V3.15 删对峙上限——replay56 直接死因：
     #     r305 上限到点硬闯 71 帧长边，对手 r310 到点 r314 起卡冻死）。
@@ -3309,12 +3365,14 @@ def test_trap_ransom():
     ok &= check("租买: 对手离开即解除承诺",
                 st._trap_avoid[0] is None, str(st._trap_avoid))
 
-    # 2) 真漏斗口（S10，绕不开）→ 永远等待，V3.15 结论不回退
+    # 2) 真漏斗口（S10，绕不开）→ 封顶局照旧等待；低任务分的
+    #    S09->S08 侧翼逃生在 test_trap_proof 里单独钉住。
     st2 = PlannerStrategy()
     last = None
     for i in range(60):
-        last = st2.main_action(gs_camp("S09", "S10", round_no=200 + i))
-    ok &= check("租买: 真漏斗口绕不开照旧等待",
+        last = st2.main_action(
+            gs_camp("S09", "S10", round_no=200 + i, task_score=150))
+    ok &= check("租买: 封顶真漏斗口照旧等待",
                 last and last["action"] == "WAIT", str(last))
     # 2a) 山路口袋遇高分贴宫门且从未露卡的边农边冲者，仍不把
     #     "尚无卡证据"当安全证据：真实平台 lose 批次显示首卡常在
