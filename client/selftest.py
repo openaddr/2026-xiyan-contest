@@ -3711,7 +3711,7 @@ def test_front_tempo_tail_follow():
     pl._opp_gate_lead = lambda state, cur: -31
     ok &= check("前段尾随: 我方领先超过30帧退出竞争",
                 not pl._front_tempo_contested(dummy, "S03"), "")
-    # V3.34 形态门控四轮收紧：只对"零设卡 + 富点干等实锤"的纯农尾随。
+    # V3.37 形态门控四轮收紧：只对"零设卡 + 富点干等实锤"的纯农尾随。
     # camper 的领先是诱饵（camper17 +75→-71）；rusher 不农任务
     # （rusher3 -89）；farm-rusher/toller 落卡前与纯农同貌但尾随=喂它
     # 掐踏边（toller0 +26→-36）；干等帧是 2986 与 2839 唯一行为分水岭

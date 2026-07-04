@@ -7,7 +7,7 @@
   三轮实验的全部翻盘与回归都发生在这里）
 - toller 0/1/3/5：冻结/回手卡代表局
 - roadfarmer 0/5/8/11：官道农 meta（reports 三败局复刻）——0/11 为
-  开局身位已知负局，5/8 是 FRONT_TEMPO 门控收益哨兵（V3.34）
+  开局身位已知负局，5/8 是 FRONT_TEMPO 门控收益哨兵（V3.37）
 - mirror 0/2/7、farmer 1/5、rusher 3：形态哨兵
 基线（V3.25）：见文件尾 EXPECT——偏离即黄灯，去跑全量电池定位。
 """
@@ -31,7 +31,7 @@ SENTINELS = (
 # V3.25 基线预期（数字来自全量电池，改动使其恶化才算红灯）
 KNOWN_UNDLV = {("camper", 4), ("camper", 23)}   # 深链死局（观察清单）
 KNOWN_LOSS = {("camper", 19),                    # 交付负局（42/48 基线内）
-              ("roadfarmer", 0), ("roadfarmer", 11)}  # 开局身位负局（V3.34
+              ("roadfarmer", 0), ("roadfarmer", 11)}  # 开局身位负局（V3.37
                                                       # 门控版未翻，观察清单）
 BOTS = {"camper": CamperBot, "farmer": FarmerBot,
         "toller": TollerBot, "rusher": RusherBot,

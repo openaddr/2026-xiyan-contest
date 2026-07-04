@@ -79,7 +79,7 @@ FRONT_TEMPO_BLOCK_ROUTE_TYPES = {P.MOUNTAIN}
 FRONT_TEMPO_KEEP_LEAD_TRAIL = -30
 FRONT_TEMPO_KEYPASS_BASE_CAP = 120
 FRONT_TEMPO_KEYPASS_TASK_ROUTES = {P.ROAD}
-# 富点干等实锤（V3.34）：2986 型在普通任务点纯等刷新波（零读条闲置），
+# 富点干等实锤（V3.37）：2986 型在普通任务点纯等刷新波（零读条闲置），
 # 2839/toller 教义"农不停步"、camper 只蹲关隘——普通节点累计闲置帧是
 # 两者唯一的行为分水岭。strategy._profile_tick 逐帧累计（停留 ≥5 帧后
 # 的无读条帧才计，滤过路噪声），过线才解锁 FRONT_TEMPO 尾随
@@ -378,7 +378,7 @@ class TaskPlanner:
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
         self._guard_seen = False       # 对手本局设过卡（漏斗先验升为 1.0，粘性）
-        self._opp_dwell_idle = 0       # 对手在普通节点的累计干等帧（V3.34，
+        self._opp_dwell_idle = 0       # 对手在普通节点的累计干等帧（V3.37，
                                        # strategy._profile_tick 写入）
         self._funnel_cache = (None, None)  # ((round, cur), (choke, t_o, prior, toll_direct))
         self._race_cache = (-1, False)     # (round, 竞速模式是否激活)
@@ -1090,7 +1090,7 @@ class TaskPlanner:
         opp = state.opp or {}
         if opp.get("delivered") or opp.get("retired"):
             return False
-        # V3.34 形态门控：只对已实锤的零设卡富点干等型纯农保速尾随。
+        # V3.37 形态门控：只对已实锤的零设卡富点干等型纯农保速尾随。
         # 四轮收紧史：unknown 放行 → camper 亏损全回来（smoke 五红灯）；
         # farm-rusher 放行 → toller0 翻负；仅 farmer+未见卡 → toller0
         # 仍翻负（2839 落卡前与 2986 同貌，信息论墙）。最终分水岭 =
