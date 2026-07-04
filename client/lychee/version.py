@@ -129,4 +129,6 @@
 #        低分任务，先吃掉，补 replay vs2696 的 S09 15 分胜负任务漏领。
 # 3.45 = 小步资源优先级：常规顺路不再默认领过所/官凭；悬崖带保留
 #        冰鉴顺手领取，避免 S07 这类确定鲜度收益被一刀切。
-BUILD_VERSION = "3.45-resource-priority-trim"
+# 3.46 = 小步几何释放：零设卡 farmer 边上收敛到咽喉且下一站可见任务
+#        预计读完早于我方抵达时，不再固定白等 12 帧。
+BUILD_VERSION = "3.46-farmer-converge-overlap"

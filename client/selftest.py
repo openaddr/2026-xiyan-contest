@@ -3744,12 +3744,20 @@ def test_farmer_walkin():
     with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
         inquire = json.load(f)["msg_data"]
 
-    def gs_choke(round_no, opp_proc=None, opp_task=90, opp_moving=False):
+    def gs_choke(round_no, opp_proc=None, opp_task=90, opp_moving=False,
+                 task_at_choke=False):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
         d["round"] = round_no
         d["contests"], d["tasks"] = [], []
+        if task_at_choke:
+            d["tasks"] = [{"taskId": "T_CHOKE", "taskTemplateId": "T01",
+                           "nodeId": "S10", "score": 30,
+                           "processRound": 5, "active": True,
+                           "completed": False, "failed": False,
+                           "ownerPlayerId": 0, "protectionPlayerId": 0,
+                           "expireRound": 600}]
         d["weather"] = {"active": [], "forecast": []}
         for p_ in d["players"]:
             if p_["playerId"] == 1001:
@@ -3818,17 +3826,23 @@ def test_farmer_walkin():
     ok &= check("农夫走边: 见过卡的对手不豁免",
                 last and last["action"] == "WAIT", str(last))
 
-    def feed_converge(profile, frames, opp_task=90, guard_seen=False):
+    def feed_converge(profile, frames, opp_task=90, guard_seen=False,
+                      task_at_choke=False):
         st = PlannerStrategy()
         st.PROFILE_ENABLED = False
         st._opp_profile = profile
         st.planner._guard_seen = guard_seen
         last = None
         for i in range(frames):
-            g = gs_choke(300 + i, opp_task=opp_task, opp_moving=True)
+            g = gs_choke(300 + i, opp_task=opp_task, opp_moving=True,
+                         task_at_choke=task_at_choke)
             last = st.main_action(g)
         return last
 
+    a = feed_converge("farmer", 1, task_at_choke=True)
+    ok &= check("农夫走边: 可见任务且无重叠时收敛零等待",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
     a = feed_converge("farmer", 13)
     ok &= check("农夫走边: 高分 farmer 收敛咽喉短等后走边（replay95 钉子）",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
