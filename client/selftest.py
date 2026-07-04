@@ -4354,6 +4354,25 @@ def test_front_tempo_tail_follow():
                 plan.kind == "task" and plan.position == "S10",
                 repr(plan))
 
+    gs = gs_replay93("S10", 30, (t_s10_same,), "S09", "S10", "E05",
+                     opp_task_score=150)
+    gs.players[2002]["delivered"] = True
+    gs.nodes["S10"]["resourceStock"] = {P.INTEL: 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=130))
+    ok &= check("S10低分直送: 先补脚下任务不先领情报",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_S10_SAME",
+                str(a))
+
+    gs = gs_replay93("S10", 120, (t_s10_same,), "S09", "S10", "E05",
+                     opp_task_score=150)
+    gs.players[2002]["delivered"] = True
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=90))
+    ok &= check("S10低分直送: 120后继续补到150",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_S10_SAME",
+                str(a))
+
     # replay99 型水路终局：我方已 150 且站住 S10，脚下 30 分任务对自己
     # 是 0 边际，但能截掉对手最后一档任务组件；驻守模式应先截任务。
     t_s10_deny = {"taskId": "T_S10_DENY", "taskTemplateId": "T01",
