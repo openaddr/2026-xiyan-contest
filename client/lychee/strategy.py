@@ -183,6 +183,10 @@ class PlannerStrategy(BaselineStrategy):
 
     MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
+    EDGE_WEAKEN_RESERVE = 4     # 边冻结常规保留：两次削弱弹药
+    EDGE_WEAKEN_RESCUE_AVAIL = 2    # 已卡死在关键口边上时，允许动用最后一组
+    EDGE_WEAKEN_RESCUE_DEFENSE = 5  # 第一刀/风化后再救，不碰满防新卡
+    EDGE_WEAKEN_RESCUE_ROUND = 300  # S10/S11 段以后才触发，避免前段误烧人手
 
     # ---- 主动设卡（V3）----
     # 咽喉类节点 + 宫前驿（V3.28：2839 的二卡就落在 S13 PALACE_STATION，
@@ -216,6 +220,7 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_CATCHUP_SLACK = 5
     GUARD_CATCHUP_TASK_GAP = 60
     GUARD_CATCHUP_MY_TASK_MAX = 30
+    GUARD_BOUNTY_EXPOSE_ETA = 30  # 30 帧后破卡会生成/结算悬赏，领先局避开送分卡
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
@@ -594,13 +599,26 @@ class PlannerStrategy(BaselineStrategy):
                 #   6 人手换一次清零的交换比恒亏（replay36: r315-317 连发削光
                 #   防 6，对手 r330 原地补卡，白冻到 r525）
                 # - 复用 WEAKEN_RESEND_GAP：削弱落地要 3-5 帧，连发只重复扣人手
-                # - 留 2 人手保底：第二张卡才是杀招（replay20: S10 烧光人手后
-                #   S11 再冻 180 帧到终场未交付）
+                # - 常规留 2 人手保底：第二张卡才是杀招（replay20: S10 烧光
+                #   人手后 S11 再冻 180 帧到终场未交付）
+                # - 平台 20579/20587 反例：第一刀后还剩 3 人，S10 防守已降
+                #   到 4/5，却继续等风化 120+ 帧，直接未交付。已在关键口边上
+                #   被冻死时，保底弹药应该转成救命第二刀。
+                avail = self._squad_avail(state)
+                last_weaken = self._weaken_sent.get(nxt, -999)
+                guard = state.enemy_guard(nxt) or {}
+                node_type = state.node(nxt).get("nodeType")
+                rescue_weaken = (
+                    last_weaken > -999
+                    and node_type in ("KEY_PASS", "PASS")
+                    and (guard.get("defense", 0) or 0) <= self.EDGE_WEAKEN_RESCUE_DEFENSE
+                    and state.round >= self.EDGE_WEAKEN_RESCUE_ROUND
+                    and avail >= self.EDGE_WEAKEN_RESCUE_AVAIL
+                )
                 if (state.phase != P.PHASE_RUSH
-                        and self._squad_avail(state) >= 4
+                        and (avail >= self.EDGE_WEAKEN_RESERVE or rescue_weaken)
                         and not self._opp_at_node(state, nxt)
-                        and state.round - self._weaken_sent.get(nxt, -999)
-                        >= self.WEAKEN_RESEND_GAP):
+                        and state.round - last_weaken >= self.WEAKEN_RESEND_GAP):
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
                 return None
             # 移动中只能用马类资源或疾行令：没有移动增益就顺手上马（不耽误本帧推进）。
@@ -848,10 +866,46 @@ class PlannerStrategy(BaselineStrategy):
         extra = 1 if node.get("nodeType") == "GATE" else 2
         if good - base_cost - extra <= self.MIN_GOOD_RESERVE:
             return None  # 好果太紧，不做对抗投资
+        if (not catchup_guard
+                and self._guard_bounty_exposure(state, cur, opp_eta, extra)):
+            return None
         self._guard_sent[cur] = state.round
         if self.log:
             self.log.info("set guard @%s extra=%d (opp eta=%d)", cur, extra, opp_eta)
         return P.a_set_guard(cur, extra)
+
+    def _guard_bounty_exposure(self, state, node_id, opp_eta, extra):
+        """领先局不把一击可破、会挂悬赏的卡送给对手。
+
+        对手已在目标边上时例外：它不能在 MOVING 状态攻坚，设卡收益来自
+        中边冻结/削弱战，不是等待它到相邻节点后拿悬赏。
+        """
+        if self._opp_profile != "farmer":
+            return False
+        me, opp = state.me, state.opp
+        if (opp.get("totalScore", 0) or 0) >= (me.get("totalScore", 0) or 0):
+            return False
+        if opp_eta < self.GUARD_BOUNTY_EXPOSE_ETA:
+            return False
+        if opp.get("routeEdgeId") and opp.get("nextNodeId") == node_id:
+            return False
+        good = opp.get("goodFruit", 0) or 0
+        bad = opp.get("badFruit", 0) or 0
+        attack = min(2, good) * 2 + min(2, bad) * 3
+        return attack >= self._guard_defense_after_set(state, node_id, extra)
+
+    def _guard_defense_after_set(self, state, node_id, extra):
+        node = state.node(node_id)
+        node_type = node.get("nodeType")
+        if node_type == "GATE":
+            cap = 4
+        elif state.has_obstacle(node_id):
+            cap = 5
+        elif node_type == "KEY_PASS":
+            cap = 7
+        else:
+            cap = 6
+        return min(cap, 2 + extra * 2)
 
     def _rear_guard_opportunity(self, state, cur, opp_eta):
         """普通汇入点/RUSH 起点反手卡：路径必经且我们来得及读条。"""

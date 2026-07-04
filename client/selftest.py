@@ -726,7 +726,16 @@ def test_edge_block():
                         for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 3) 停在节点、对手正读条设卡下一跳 -> 等卡成型后攻坚，不上边挨冻
+    # 3) 第一刀后仍冻在关键口边上：动用最后一组人手补第二刀，避免死等风化
+    st = PlannerStrategy()
+    st._weaken_sent["S10"] = 320 - PlannerStrategy.WEAKEN_RESEND_GAP
+    a = st.decide(edge_state(guard_def=4, squad=3))
+    ok &= check("边冻结: 关键口第一刀后低余量补第二刀",
+                any(x["action"] == "SQUAD_WEAKEN" and x["targetNodeId"] == "S10"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 4) 停在节点、对手正读条设卡下一跳 -> 等卡成型后攻坚，不上边挨冻
     a = PlannerStrategy().decide(edge_state(guard_def=0, opp_setting=True,
                                             on_edge=False))
     main_acts = [x for x in a if x["action"] in P.MAIN_ACTION_TYPES]
@@ -734,7 +743,7 @@ def test_edge_block():
                 len(main_acts) == 1 and main_acts[0]["action"] == "WAIT",
                 json.dumps(a, ensure_ascii=False))
 
-    # 4) 卡成型后（停在节点）恢复正常攻坚
+    # 5) 卡成型后（停在节点）恢复正常攻坚
     a = PlannerStrategy().decide(edge_state(guard_def=6, on_edge=False))
     ok &= check("防冻结: 卡成型后节点攻坚",
                 any(x["action"] == "BREAK_GUARD" and x["targetNodeId"] == "S10"
@@ -927,7 +936,8 @@ def test_active_guard():
         inquire = json.load(f)["msg_data"]
 
     def gs_at(cur="S10", opp_pos="S07", round_no=200, phase="NORMAL",
-              good=90, my_guards=(), node_guarded=False):
+              good=90, my_guards=(), node_guarded=False,
+              opp_good=96, opp_bad=0, my_score=120, opp_score=90):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -938,12 +948,13 @@ def test_active_guard():
                 p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
                          routeEdgeId=None, currentProcess=None, buffs=[],
                          resources={}, freshness=95.0, goodFruit=good,
-                         badFruit=0, taskScore=90)
+                         badFruit=0, taskScore=90, totalScore=my_score)
             else:
                 p.update(state="MOVING" if opp_pos else "IDLE",
                          currentNodeId=opp_pos, nextNodeId=None,
                          routeEdgeId=None, currentProcess=None,
-                         delivered=False, retired=False)
+                         delivered=False, retired=False, goodFruit=opp_good,
+                         badFruit=opp_bad, totalScore=opp_score)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["resourceStock"] = {}
@@ -961,6 +972,13 @@ def test_active_guard():
                 a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10"
                 and a.get("extraGoodFruit", 0) == 2,
                 str(a))
+
+    # 1b) 领先局若对手当前可一击破满防卡且 30+ 帧后才到，会把卡变成悬赏礼物
+    st = PlannerStrategy()
+    st._opp_profile = "farmer"
+    a = st.main_action(gs_at(opp_bad=1))
+    ok &= check("设卡: 领先局不送可秒破悬赏卡",
+                not (a and a["action"] == "SET_GUARD"), str(a))
 
     # 2) 对手已过（在 S11，路线不再经过 S10）-> 不设
     a = PlannerStrategy().main_action(gs_at(opp_pos="S11"))
@@ -1551,13 +1569,14 @@ def test_tempo_guard():
                 p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
                          routeEdgeId=None, currentProcess=None, buffs=[],
                          resources={}, freshness=85.0, goodFruit=95,
-                         badFruit=1, taskScore=120)
+                         badFruit=1, taskScore=120, totalScore=120)
             else:
                 total = 55200
                 p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
                          routeEdgeId="E05", edgeTotalMs=total,
                          edgeProgressMs=int(total * opp_progress),
-                         currentProcess=None, delivered=False, retired=False)
+                         currentProcess=None, delivered=False, retired=False,
+                         goodFruit=94, badFruit=1, totalScore=90)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["guard"] = None
