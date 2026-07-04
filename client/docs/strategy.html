@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.28-rule-hardening)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.29-farmer-walkin)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.28-rule-hardening</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.29-farmer-walkin</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -587,9 +587,16 @@ selftest 213 项全绿。观察清单：seed 4/23 深链死局（纯节奏救不
 落地，on_start 失败不阻断 ready</b></td>
 <td>配额旧用例按规则翻转重写（WAIT 为正确行为）；新增 RUSH 宫前驿回手卡、双保命网用例。selftest 全绿 +
 smoke 全绿 + camper×8/toller×3/farmer×2/镜像 热种子无新未交付（seed10 -21 谨慎税，可接受）</td></tr>
+<tr><td><b>3.29 farmer-walkin</b></td><td><b>farmer 咽喉有界等待（replay93 抓获：官道/任务全对，S09 对零设卡
+农夫死等 109 帧 → r598 交付差 2 帧收盘、鲜度 -7）：定价层 farmer 先验 0.35 与保命层无上限死等的自相矛盾修正。
+三重门（farmer 画像 + 全场未见卡 + 它停靠在读任务条中——读条期规则上无法同帧起手 SET_GUARD）全中 → 等待
+封顶 TRAP_FARMER_WAIT=25 后走边（走边决定粘性，不因计数复位振荡）；camper / 见过卡 / 非读条对手照旧无上限
+等待，V3.15 教义不动；对手变脸落卡 _guard_seen 即永久关豁免</b></td>
+<td>selftest 5 钉（正例 + 预算内 + 三个控制组）全绿；smoke 全绿；camper×6/farmer×3/toller×2 热种子无新
+未交付、逐位或噪声级</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.28-rule-hardening ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.29-farmer-walkin ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 

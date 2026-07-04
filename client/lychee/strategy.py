@@ -216,6 +216,16 @@ class PlannerStrategy(BaselineStrategy):
     TRAP_ORDINARY_WAIT = 45     # 普通节点驻扎等待预算（V3.22）：农夫型
                                 # 久驻不狙击，等满即硬闯；45 ≈ 它一次任务
                                 # 波次间隔的量级，也 < 被掐的冻结代价
+    # farmer 咽喉有界等待（V3.29，replay93 抓获）：定价层已按 farmer
+    # 先验 0.35 判官道便宜，保命层却不读画像无上限死等——replay93 在
+    # S09 对着"蹲武关农波次、整局零设卡"的 2738 站了 109 帧，r598 才
+    # 交付（离收盘 2 帧），差点把 716 分等成未交付。教义修正：无上限
+    # 等待自身在钟表面前就是灾难级风险。三重门（画像 farmer + 全场未
+    # 见卡 + 它此刻停靠在读任务条）全中时，等待封顶后走边——它每张
+    # 任务读条 4 帧内规则上无法起手设卡，走边窗口有真实掩护；它若真
+    # 变脸落卡，_guard_seen 立刻关死本豁免，一局至多上当一次。
+    # camper / 见过卡 / 非农读条对手照旧无上限等待（V3.15 教义不动）
+    TRAP_FARMER_WAIT = 25
     TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
                                 # （无界版被电池证伪 camper 34/48；有界
                                 # 变体的配对对照见 trap-gate 实验脚本）
@@ -1084,6 +1094,15 @@ class PlannerStrategy(BaselineStrategy):
         return (state.round + state.player_id) % 2 == 1
 
     @staticmethod
+    def _opp_farming_here(state, node_id):
+        """对手停靠在该节点且正在读任务条（farmer 有界等待的第三重门）。"""
+        opp = state.opp
+        if not opp or opp.get("routeEdgeId") \
+                or opp.get("currentNodeId") != node_id:
+            return False
+        return bool((opp.get("currentProcess") or {}).get("taskId"))
+
+    @staticmethod
     def _opp_at_node(state, node_id):
         """对手主车队正停靠在该节点上（能以 ≤3 好果原地补卡，削弱=喂饵）。"""
         opp = state.opp
@@ -1198,6 +1217,22 @@ class PlannerStrategy(BaselineStrategy):
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_ORDINARY_WAIT:
                 return give_up()
+        # farmer 咽喉有界等待（V3.29）：三重门全中才封顶——画像 farmer、
+        # 全场未见其设卡、它此刻停靠在 nxt 读任务条（读条中规则上无法
+        # 同帧起手 SET_GUARD）。等待超预算即走边，别把定价层已经买单的
+        # 便宜官道等成 r598 交付
+        if (camped and not ordinary
+                and self._opp_profile == "farmer"
+                and not self.planner._guard_seen
+                and self._opp_farming_here(state, nxt)):
+            _, n_wait = self._trap_wait
+            if self._trap_wait[0] == nxt and n_wait >= self.TRAP_FARMER_WAIT:
+                if self.log:
+                    self.log.info("farmer occupies choke %s, walk-in after %d",
+                                  nxt, n_wait)
+                # 不走 give_up()：保留计数使走边决定粘性（清零会在下一帧
+                # 决策点让等待从头再来）；对手离开后由上游正常复位
+                return False
         # 无弹药豁免（V3.20）：中边冻结的前提是对手真能落卡——设卡每队
         # 同时至多 2 张，KEY_PASS 还要 1 好果底价。配额用满/掏不出底价时
         # 占位只是身位，没有冻结威胁，直接过边。与短边豁免同级：规则数学

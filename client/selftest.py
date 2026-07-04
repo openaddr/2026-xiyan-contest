@@ -3244,6 +3244,84 @@ def test_rule_fixes():
     return ok
 
 
+def test_farmer_walkin():
+    """V3.29 farmer 咽喉有界等待（replay93：S09 对零设卡农夫死等 109 帧，
+    r598 交付差 2 帧收盘）。三重门（farmer 画像+未见卡+读任务条中）
+    全中 → 等待封顶 TRAP_FARMER_WAIT 后走边；任一门不中照旧无上限等。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_choke(round_no, opp_proc=None, opp_task=90):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p_ in d["players"]:
+            if p_["playerId"] == 1001:
+                p_.update(state="IDLE", currentNodeId="S09", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None, buffs=[],
+                          resources={}, freshness=90.0, goodFruit=90,
+                          badFruit=0, taskScore=150, verified=False)
+            else:
+                p_.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=opp_proc, buffs=[],
+                          delivered=False, retired=False, taskScore=opp_task,
+                          goodFruit=90)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    FARM_PROC = {"action": "CLAIM_TASK", "taskId": "T_X",
+                 "targetNodeId": "S10", "remainRound": 3}
+
+    def feed(opp_proc, profile, frames):
+        st = PlannerStrategy()
+        st.PROFILE_ENABLED = False          # 手动钉画像，隔离被测逻辑
+        st._opp_profile = profile
+        last = None
+        for i in range(frames):
+            g = gs_choke(260 + i, opp_proc=opp_proc)
+            st.planner.opp_profile = profile
+            last = st.main_action(g)
+        return st, last
+
+    st, a = feed(FARM_PROC, "farmer", 30)
+    ok &= check("农夫走边: 三重门全中等待封顶后走边（replay93 钉子）",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
+    st, a = feed(FARM_PROC, "farmer", 20)
+    ok &= check("农夫走边: 预算内仍等待（不秒过）",
+                a and a["action"] == "WAIT", str(a))
+    st, a = feed(None, "farmer", 30)
+    ok &= check("农夫走边: 它没在读任务条则照旧无上限等",
+                a and a["action"] == "WAIT", str(a))
+    st, a = feed(FARM_PROC, "camper", 30)
+    ok &= check("农夫走边: camper 画像不豁免（V3.15 教义不动）",
+                a and a["action"] == "WAIT", str(a))
+    st = PlannerStrategy()
+    st.PROFILE_ENABLED = False
+    st._opp_profile = "farmer"
+    st.planner._guard_seen = True
+    last = None
+    for i in range(30):
+        g = gs_choke(260 + i, opp_proc=FARM_PROC)
+        st.planner.opp_profile = "farmer"
+        last = st.main_action(g)
+    ok &= check("农夫走边: 见过卡的对手不豁免",
+                last and last["action"] == "WAIT", str(last))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -3280,6 +3358,7 @@ def main():
     ok &= test_farm_meta()
     ok &= test_road_tax()
     ok &= test_rule_fixes()
+    ok &= test_farmer_walkin()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
