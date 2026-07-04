@@ -861,16 +861,16 @@ class PlannerStrategy(BaselineStrategy):
                 return steal_risk
             return P.a_claim_task(plan.task["taskId"])
 
-        # 资源提货目标：到位就领（V3.2 冰鉴猎手；同帧撞车交给窗口博弈）
-        if plan.kind == "resource" and cur == plan.position:
-            return P.a_claim_resource(cur, plan.resource)
-
         # S10/S11 已经是后段任务泉；低分直送前，脚下 4~6 帧任务比情报/
         # 官凭这类顺路资源更该先兑现（2026-07-05 60:150 任务分败局）。
         rescue = self._same_node_low_score_task(state, plan, cur)
         if rescue and cur in ("S10", "S11") \
                 and (me.get("taskScore", 0) or 0) < 150:
             return P.a_claim_task(rescue["taskId"])
+
+        # 资源提货目标：到位就领（V3.2 冰鉴猎手；同帧撞车交给窗口博弈）
+        if plan.kind == "resource" and cur == plan.position:
+            return P.a_claim_resource(cur, plan.resource)
 
         # 顺路领取（余量闸门 15：领取只花 2 帧读条，换 +18 分几乎恒值；
         # 阴影惩罚会压低 slack，这里的闸门只挡真正的临门一脚）
@@ -1369,12 +1369,12 @@ class PlannerStrategy(BaselineStrategy):
 
     def _same_node_low_score_task(self, state, plan, cur):
         """直送兜底：先吃脚下短任务，避免低任务分早交付。"""
-        if plan.kind != "deliver" or state.phase != P.PHASE_NORMAL:
+        if state.phase != P.PHASE_NORMAL:
             return None
         if state.me.get("verified") or cur not in ("S09", "S10", "S11"):
             return None
         base = state.me.get("taskScore", 0) or 0
-        milestone_rescue = 90 <= base < 120
+        milestone_rescue = plan.kind == "deliver" and 90 <= base < 120
         s10_score_rescue = cur in ("S10", "S11") and base < 150
         if not (milestone_rescue or s10_score_rescue):
             return None

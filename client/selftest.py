@@ -4364,6 +4364,25 @@ def test_front_tempo_tail_follow():
                 and a["taskId"] == "T_S10_SAME",
                 str(a))
 
+    a = PlannerStrategy().main_action(
+        gs, Plan("resource", position="S10", resource=P.INTEL, slack=130))
+    ok &= check("S10低分补课: 非直送计划也先补脚下任务",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_S10_SAME",
+                str(a))
+
+    t_s11_next = {"taskId": "T_S11_NEXT", "taskTemplateId": "T01",
+                  "nodeId": "S11", "processRound": 4, "score": 30,
+                  "expireRound": 420, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0, "routeBucket": P.ROAD}
+    a = PlannerStrategy().main_action(
+        gs, Plan("task", task=t_s11_next, position="S11", slack=130))
+    ok &= check("S10低分补课: 去别处任务前先吃同点任务",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_S10_SAME",
+                str(a))
+
     gs = gs_replay93("S10", 120, (t_s10_same,), "S09", "S10", "E05",
                      opp_task_score=150)
     gs.players[2002]["delivered"] = True
