@@ -173,6 +173,7 @@ class PlannerStrategy(BaselineStrategy):
     GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
     IDLE_TASK_MAX_PROC = 6      # 空转帧只顺手吃短任务，长读条仍交给规划器
     IDLE_TASK_TRAP_WAIT = 6     # farmer 防陷阱等待的可兑现空窗
+    HORSE_CLAIM_MIN_SAVE = 3    # 顺路拿马至少要覆盖 2 帧领取读条再多赚 1 帧
     # 顺路领取清单：默认只拿确定收益高的冰鉴/马。文书类出牌池收益不稳定，
     # 2 帧读条在小分差局会反噬；情报仍由 _should_claim_intel_en_route 动态加入。
     CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
@@ -860,6 +861,10 @@ class PlannerStrategy(BaselineStrategy):
             for rt in claim_list:
                 limit = self.CLAIM_LIMIT.get(rt, 1)
                 if stock.get(rt, 0) > 0 and res.get(rt, 0) < limit:
+                    if rt in (P.FAST_HORSE, P.SHORT_HORSE) \
+                            and not self._claim_horse_en_route_worthwhile(
+                                state, plan, cur, rt):
+                        continue
                     if self._yield_for_contention(state):
                         return P.a_wait()  # 错峰一帧再领，资源窗口不值得打
                     return P.a_claim_resource(cur, rt)
@@ -1242,6 +1247,20 @@ class PlannerStrategy(BaselineStrategy):
         if stock.get(P.ICE_BOX, 0) > 0 and res.get(P.ICE_BOX, 0) < 2:
             return P.a_claim_resource(cur, P.ICE_BOX)
         return None
+
+    def _claim_horse_en_route_worthwhile(self, state, plan, cur, horse):
+        """直送阶段顺手拿马前，确认剩余路程至少能省回领取读条。"""
+        if not plan or plan.kind != "deliver":
+            return True
+        target = state.terminal_node if state.me.get("verified") else state.gate_node
+        base_frames, base_path = state.graph.shortest_path(cur, target, P.BASE_SPEED)
+        if not base_path:
+            return False
+        speed = P.SPEED_FAST_HORSE if horse == P.FAST_HORSE else P.SPEED_SHORT_HORSE
+        horse_frames, horse_path = state.graph.shortest_path(cur, target, speed)
+        if not horse_path:
+            return False
+        return base_frames - horse_frames >= self.HORSE_CLAIM_MIN_SAVE
 
     # ---------- 情报：空转帧顺手用（V3.12）----------
     # 注定 WAIT 的帧（排队/防陷阱/蹲刷等）不占主车队移动时间，此时若手里有情报，

@@ -2138,6 +2138,22 @@ def test_latent_mechanics():
                 not (a and a.get("action") == "CLAIM_RESOURCE"
                      and a.get("resourceType") == "PASS_TOKEN"), str(a))
 
+    # ---- 马匹 1: 直送阶段临门短路，马省不回 2 帧领取读条则不顺手领 ----
+    gs = base_state(cur="S13", resources={})
+    gs.nodes["S13"]["resourceStock"] = {"SHORT_HORSE": 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=120))
+    ok &= check("马匹: 临门短路不顺手领马",
+                not (a and a.get("action") == "CLAIM_RESOURCE"
+                     and a.get("resourceType") == "SHORT_HORSE"), str(a))
+
+    # ---- 马匹 2: 剩余路程足够长时，顺路马仍可领取 ----
+    gs = base_state(cur="S07", resources={})
+    gs.nodes["S07"]["resourceStock"] = {"FAST_HORSE": 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=160))
+    ok &= check("马匹: 长路直送仍顺手领马",
+                a and a.get("action") == "CLAIM_RESOURCE"
+                and a.get("resourceType") == "FAST_HORSE", str(a))
+
     # ---- 情报 3: 不主动顺路领取情报；只有已持有时才利用空转/预热收益 ----
     gs = base_state(cur="S06", resources={})
     gs.me["taskScore"] = 90
