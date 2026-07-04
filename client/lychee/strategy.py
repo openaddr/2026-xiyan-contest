@@ -206,8 +206,11 @@ class PlannerStrategy(BaselineStrategy):
     # 仍留 4 帧读条的 16 倍缓冲。
     GUARD_SLACK_MIN = 65        # 自己交付余量充足才花这 4 帧
     GUARD_ROUTE_TOLERANCE = 15  # 判断该节点是否在对手高效路线上的容差（帧）
+    GUARD_REAR_ROUTE_TOLERANCE = 3  # 尾段单边卡不押近似五五开的分叉
     GUARD_RETRY_GAP = 40        # 同一节点设卡重试间隔
     GUARD_REGUARD_WINDOW = 18   # 我方卡刚被打穿且仍占点时，允许补卡反打
+    GUARD_SQUAD_RICH_SKIP = 4   # farmer/跟随者攒着远程削弱弹药时，不喂好果
+    GUARD_REGUARD_SQUAD_SKIP = 2
     # 关隘热设卡（V3.18）：刚赢下漏斗竞速、对手正被汇过来（ETA ≤60）时，
     # 4 帧读条 + 1~3 好果换对手 45+ 帧死等/满防税，是竞速胜利的兑现动作
     # ——65 的常规闸门在这个场景下把"过关隘必设卡"整档拦掉（对手 2614
@@ -905,6 +908,8 @@ class PlannerStrategy(BaselineStrategy):
             # 等 1~4 帧卡成型后站在节点上攻坚拆掉再走，代价小一个数量级
             return self._idle_upgrade(state, plan)
         if self._mid_edge_trap_risk(state, cur, nxt, plan):
+            if self._early_road_follow_release(state, cur, nxt):
+                return P.a_move(nxt)
             # 防中边陷阱：等对手离开我们的下一跳再上边。等待不是无价的——
             # 等够绕路差价后租买止损改道（V3.18），绕不开的真漏斗口继续等
             alt = self._trap_reroute(state, cur, nxt, target)
@@ -915,6 +920,25 @@ class PlannerStrategy(BaselineStrategy):
             ) else 0
             return self._idle_upgrade(state, plan, min_wait=idle_wait)
         return P.a_move(nxt)
+
+    def _early_road_follow_release(self, state, cur, nxt):
+        """S02/S03 官道明牌尾随不被陷阱层改回水路。
+
+        replay99：对手已踏上 S02->S03 后，继续把它当"下一跳埋伏"会触发
+        租买改道，绕回 S04/S05 零冰水路。开局官道尾随的主要风险不是卡，
+        而是被水路断冰；未见卡时直接追。
+        """
+        if state.phase != P.PHASE_NORMAL or self.planner._guard_seen:
+            return False
+        if cur == "S02" and nxt == "S03":
+            pass
+        elif cur == "S03" and nxt == "S07":
+            pass
+        else:
+            return False
+        if (state.me.get("taskScore", 0) or 0) >= 60:
+            return False
+        return self.planner._opp_committed_corridor(state) == P.ROAD
 
     # ---------- 主动设卡（V3）----------
     # demo 用这招连赢我们四局：在咽喉节点身后设卡，对手要么烧果攻坚、
@@ -971,6 +995,11 @@ class PlannerStrategy(BaselineStrategy):
             or self._rear_guard_opportunity(state, cur, opp_eta)
         if not (choke_guard or rear_guard):
             return None
+        if rear_guard and not choke_guard and \
+                opp_eta + here_to_gate > opp_to_gate + self.GUARD_REAR_ROUTE_TOLERANCE:
+            return None
+        if self._opp_squad_rich_guard_skip(state, reguard):
+            return None
         # slack 闸门分档（V3.18/V3.23）：常规 65；关键关隘热窗口 25；
         # 普通汇入点只在路径必经的反手卡场景降低门槛；RUSH 起点二卡再放宽。
         slack_min = self.GUARD_SLACK_MIN
@@ -1017,6 +1046,22 @@ class PlannerStrategy(BaselineStrategy):
             self.log.info("set%s guard @%s extra=%d (opp eta=%d)",
                           " follow-up" if reguard else "", cur, extra, opp_eta)
         return P.a_set_guard(cur, extra)
+
+    def _opp_squad_rich_guard_skip(self, state, reguard=False):
+        """零卡 farmer/跟随者还攒着小分队时，防 6 卡会被远程削弱套利。
+
+        replay99：我们 9 好果三张卡只换来对手 6 人手+少量时间税；对方
+        全局零设卡、任务已农高、squadAvailable 充足，这时好果比卡更值钱。
+        """
+        if self._opp_profile != "farmer" or self.planner._guard_seen:
+            return False
+        opp = state.opp or {}
+        squads = opp.get("squadAvailable")
+        if squads is None:
+            return False
+        threshold = (self.GUARD_REGUARD_SQUAD_SKIP if reguard
+                     else self.GUARD_SQUAD_RICH_SKIP)
+        return squads >= threshold
 
     def _track_own_guard_breaks(self, state):
         """记录我方刚被打穿的卡点，给同点补卡一个短窗口。
@@ -1566,8 +1611,16 @@ class PlannerStrategy(BaselineStrategy):
             def penalty(nid, _base=base_pen, _avoid=avoid):
                 return _base(nid) + \
                     (self.TRAP_AVOID_PENALTY if nid == _avoid else 0)
-        return state.graph.next_hop(cur, target, state.my_speed(), penalty,
-                                    self.planner._edge_cost_fn(state))
+        nxt = state.graph.next_hop(cur, target, state.my_speed(), penalty,
+                                   self.planner._edge_cost_fn(state))
+        if nxt in ("S04", "S05") and target not in ("S04", "S05"):
+            base = state.me.get("taskScore", 0) or 0
+            if self.planner._front_tempo_early_water_fork_blocked(
+                    state, cur, nxt, base, P.WATER):
+                road_next = "S03" if cur == "S02" else "S07"
+                if state.graph.edge_between(cur, road_next):
+                    return road_next
+        return nxt
 
     # ---------- 同帧争抢规避 ----------
 

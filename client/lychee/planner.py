@@ -114,6 +114,10 @@ FRONT_TEMPO_WATER_DETOUR_MIN_LEG = 45
 FRONT_TEMPO_WATER_DETOUR_MIN_DETOUR = 28
 FRONT_TEMPO_WATER_DETOUR_FROM = {"S07", "S09"}
 FRONT_TEMPO_WATER_DETOUR_TARGETS = {"S04", "S05"}
+FRONT_TEMPO_EARLY_WATER_FORK_GUARD = True
+FRONT_TEMPO_EARLY_WATER_FORK_BASE_CAP = 60
+FRONT_TEMPO_EARLY_WATER_FORK_FROM = {"S02", "S03"}
+FRONT_TEMPO_EARLY_WATER_FORK_TARGETS = {"S04", "S05"}
 LATE_RESOURCE_PROGRESS = 0.62
 LATE_RESOURCE_MULT = 1.25
 ICE_AMMO_TARGET_BAD = 1
@@ -866,7 +870,8 @@ class TaskPlanner:
                 f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
                 if not path:
                     continue
-                if self._front_tempo_resource_blocked(state, cur, node_id, path):
+                if self._front_tempo_resource_blocked(state, cur, node_id,
+                                                      path, rtype):
                     continue
                 f_to += self._backtrack_tax(state, cur, node_id)
                 f_back, back = g.shortest_path(node_id, state.gate_node, speed,
@@ -1439,6 +1444,37 @@ class TaskPlanner:
         return (to_target >= FRONT_TEMPO_WATER_DETOUR_MIN_LEG
                 or detour >= FRONT_TEMPO_WATER_DETOUR_MIN_DETOUR)
 
+    def _front_tempo_early_water_fork_blocked(self, state, cur, target, base,
+                                              bucket, resource_type=None):
+        """S02/S03 前段别因官道被抢几帧就承诺低位水路。
+
+        replay99：S02 窗口输后，旧教义把"对手先到 S03"理解成官道已丢，
+        于是转去 S04/S05 水路。结果任务分追平但丢掉 S07/S10 冰链和鲜度。
+        这里只拦会把我们拉进 S04/S05 的早段水路诱因；冰鉴仍可抢。
+        """
+        if not FRONT_TEMPO_EARLY_WATER_FORK_GUARD:
+            return False
+        if state.phase != P.PHASE_NORMAL:
+            return False
+        if not cur or cur not in FRONT_TEMPO_EARLY_WATER_FORK_FROM:
+            return False
+        if not target or target == cur:
+            return False
+        if target not in FRONT_TEMPO_EARLY_WATER_FORK_TARGETS:
+            return False
+        if FRONT_TEMPO_CORRIDOR_NODES.get(cur) == P.WATER:
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) >= FRONT_TEMPO_EARLY_WATER_FORK_BASE_CAP:
+            return False
+        if bucket != P.WATER:
+            return False
+        if resource_type == P.ICE_BOX:
+            return False
+        if self._opp_committed_corridor(state) != P.ROAD:
+            return False
+        return True
+
     def _keypass_tempo_task_blocked(self, state, task, cur, pos, speed,
                                     penalty, ecost, base):
         """首个关键关前的节奏闸门：120 分够进 S10，非官道先让。"""
@@ -1461,6 +1497,11 @@ class TaskPlanner:
             return True
         if self._front_tempo_water_detour_task_blocked(
                 state, task, cur, pos, speed, penalty, ecost, base):
+            return True
+        target = task.get("nodeId") or pos
+        if self._front_tempo_early_water_fork_blocked(
+                state, cur, target, base,
+                self._task_route_bucket(state, task, pos)):
             return True
         if self._front_tempo_corridor_follow_blocked(
                 state, task, cur, pos, speed, penalty, ecost, base):
@@ -1508,9 +1549,14 @@ class TaskPlanner:
         _, path = state.graph.shortest_path(cur, pos, speed, penalty, ecost)
         return self._front_tempo_blocks_path(state, path)
 
-    def _front_tempo_resource_blocked(self, state, cur, node_id, path):
+    def _front_tempo_resource_blocked(self, state, cur, node_id, path,
+                                      resource_type=None):
         """早段不专程钻支线拿资源；贴着对手主路的硬件资源仍可争。"""
         base = state.me.get("taskScore", 0) or 0
+        bucket = FRONT_TEMPO_CORRIDOR_NODES.get(node_id)
+        if self._front_tempo_early_water_fork_blocked(
+                state, cur, node_id, base, bucket, resource_type):
+            return True
         if base >= 30 and self._front_tempo_heavy_mountain_target_blocked(
                 state, cur, node_id, P.BASE_SPEED, self._penalty_fn(state),
                 self._edge_cost_fn(state), base):

@@ -1001,7 +1001,8 @@ def test_active_guard():
 
     def gs_at(cur="S10", opp_pos="S07", round_no=200, phase="NORMAL",
               good=90, my_guards=(), node_guarded=False,
-              opp_good=96, opp_bad=0, my_score=120, opp_score=90):
+              opp_good=96, opp_bad=0, my_score=120, opp_score=90,
+              opp_task=90, opp_squads=2):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -1018,7 +1019,8 @@ def test_active_guard():
                          currentNodeId=opp_pos, nextNodeId=None,
                          routeEdgeId=None, currentProcess=None,
                          delivered=False, retired=False, goodFruit=opp_good,
-                         badFruit=opp_bad, totalScore=opp_score)
+                         badFruit=opp_bad, totalScore=opp_score,
+                         taskScore=opp_task, squadAvailable=opp_squads)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["resourceStock"] = {}
@@ -1042,6 +1044,28 @@ def test_active_guard():
     st._opp_profile = "farmer"
     a = st.main_action(gs_at(opp_bad=1))
     ok &= check("设卡: 领先局不送可秒破悬赏卡",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    # 1c) replay99：零设卡 farmer/跟随者攒着远程削弱弹药时，防 6 卡会被
+    #     低成本拆掉，保好果优先。
+    st = PlannerStrategy()
+    st._opp_profile = "farmer"
+    a = st.main_action(gs_at(opp_task=120, opp_squads=6))
+    ok &= check("设卡: farmer 小分队充足时不喂防6卡",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    st = PlannerStrategy()
+    st._opp_profile = "farmer"
+    a = st.main_action(gs_at(opp_task=120, opp_squads=1))
+    ok &= check("设卡: farmer 弹药不足时仍可兑现卡点",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
+                str(a))
+
+    st = PlannerStrategy()
+    st._opp_profile = "farmer"
+    st._own_guard_broken["S10"] = 196
+    a = st.main_action(gs_at(opp_task=120, opp_squads=2))
+    ok &= check("设卡: 同点卡刚被拆且对手仍有削弱弹药时不复立",
                 not (a and a["action"] == "SET_GUARD"), str(a))
 
     # 2) 对手已过（在 S11，路线不再经过 S10）-> 不设
@@ -1095,22 +1119,29 @@ def test_corridor():
         inquire = json.load(f)["msg_data"]
 
     def gs_race(my_pos="S02", opp_pos="S07", weather=None, round_no=60,
-                strip_process=True):
+                strip_process=True, opp_next=None, opp_edge=None,
+                opp_progress=0, tasks=None):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
         d["round"] = round_no
-        d["contests"], d["tasks"] = [], []
+        d["phase"] = P.PHASE_NORMAL
+        d["contests"], d["tasks"] = [], list(tasks or [])
         d["weather"] = weather or {"active": [], "forecast": []}
+        edge_total = (gs.graph.edge_total_move(gs.graph.edges[opp_edge])
+                      if opp_edge else None)
         for p in d["players"]:
             if p["playerId"] == 1001:
                 p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
                          routeEdgeId=None, currentProcess=None, buffs=[],
                          resources={}, freshness=95.0, goodFruit=95, badFruit=0)
             else:
-                p.update(state="MOVING", currentNodeId=opp_pos, nextNodeId=None,
-                         routeEdgeId=None, currentProcess=None,
-                         delivered=False, retired=False)
+                p.update(state="MOVING", currentNodeId=opp_pos,
+                         nextNodeId=opp_next, routeEdgeId=opp_edge,
+                         currentProcess=None, delivered=False, retired=False)
+                if edge_total is not None:
+                    p.update(edgeTotalMs=edge_total,
+                             edgeProgressMs=opp_progress)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["guard"] = None
@@ -1133,6 +1164,23 @@ def test_corridor():
     a = st.main_action(gs)
     ok &= check("走廊: 对手在官道前方走水路",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S04", str(a))
+
+    # 2b) replay99：对手已用 E02 暴露官道承诺时，低位水路任务/直送兜底
+    #     都不能再把 S02 岔口带去 S04。
+    t_s04_water = {"taskId": "T_S04_WATER", "taskTemplateId": "T01",
+                   "nodeId": "S04", "processRound": 4, "score": 30,
+                   "expireRound": 221, "active": True, "completed": False,
+                   "failed": False, "ownerPlayerId": 0,
+                   "protectionPlayerId": 0, "routeBucket": P.WATER}
+    gs = gs_race(my_pos="S02", opp_pos="S02", opp_next="S03",
+                 opp_edge="E02", opp_progress=8000, tasks=(t_s04_water,))
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    a = st.main_action(gs, plan)
+    ok &= check("走廊: 对手官道动身后不因低位水路切 S04",
+                plan.kind != "task" and a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S03",
+                f"{plan} -> {a}")
 
     # 3) 天气改道：暴雨生效中（水路 x1.35）→ 从 S02 改走官道 S03
     rain_now = {"active": [{"type": "HEAVY_RAIN", "region": "WATER",

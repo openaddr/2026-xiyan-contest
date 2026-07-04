@@ -638,10 +638,14 @@ slack +30 帧，纯农画像豁免</b></td>
 90:60 强信号放宽到对手任务分 ≥60 且领先 ≥15、45 帧内必经、前方仍有关键关；领先局若对手正在攻坚我方有效卡，
 且 defense+2 不超过 maxDefense，使用富余小分队增援补防</b></td>
 <td>回应“必经点正收益设卡”和“领先时补关卡防御”；不击穿走廊人手底仓，不为超上限/半收益增援浪费人手；selftest + smoke 全绿</td></tr>
+<tr><td><b>3.49 road-ice-guard-economy</b></td><td><b>replay99 果品经济修复：S02/S03 对手已用官道边暴露承诺时，
+低位水路任务/直送兜底/陷阱租买层不再把路线改回 S04/S05；farmer 小分队弹药充足时不喂防 6 卡，
+同点刚被拆且对手仍有削弱弹药时不复立，尾段单边卡收紧路径确定性</b></td>
+<td>针对“任务分打平但零冰水路 + 9 好果卡被拆”形态；selftest 全绿，保留 S04/S05 真冰鉴豁免</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.41-aggressive-denial-reinforce ·
-自测 <code>python3 selftest.py</code> · 哨兵 <code>python3 smoke.py</code>（含 roadfarmer）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.49-road-ice-guard-economy ·
+自测 <code>python3 client/selftest.py</code></p>
 </div>
 
 <script>
