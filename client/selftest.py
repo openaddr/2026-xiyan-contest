@@ -4196,6 +4196,15 @@ def test_front_tempo_tail_follow():
                 plan.kind == "task" and plan.position == "S09",
                 repr(plan))
 
+    gs_rescue = gs_replay93("S09", 90, (t_s09_same,), "S08", "S10", "E17",
+                            opp_task_score=150)
+    st_rescue = PlannerStrategy()
+    a = st_rescue.main_action(gs_rescue, Plan("deliver", slack=120))
+    ok &= check("前段保速: S09 直送兜底先吃脚下15分",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_S09_SAME_LOW",
+                f"{a}")
+
     t_s07 = {"taskId": "T_S07_OVER", "taskTemplateId": "T01",
              "nodeId": "S07", "processRound": 4, "score": 30,
              "expireRound": 320, "active": True, "completed": False,

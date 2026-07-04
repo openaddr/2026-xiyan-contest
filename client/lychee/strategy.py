@@ -864,6 +864,10 @@ class PlannerStrategy(BaselineStrategy):
                         return P.a_wait()  # 错峰一帧再领，资源窗口不值得打
                     return P.a_claim_resource(cur, rt)
 
+        rescue = self._same_node_low_score_task(state, plan, cur)
+        if rescue:
+            return P.a_claim_task(rescue["taskId"])
+
         # 尾段蹲刷（V3.10）：没有值得做的目标且余量充足时，站在任务候选点
         # 上等刷新 —— 刷出的任务下一帧就会被 plan 接住（同点零绕路必中）
         if plan.kind == "deliver" and self._should_loiter(state, plan, cur):
@@ -1189,6 +1193,35 @@ class PlannerStrategy(BaselineStrategy):
             self.log.info("loiter for task refresh @%s (%d/%d)",
                           cur, self._loiter_spent, self.LOITER_BUDGET)
         return True
+
+    def _same_node_low_score_task(self, state, plan, cur):
+        """小步兜底：准备直送/蹲刷时，先吃脚下 90->120 档的短读条任务。"""
+        if plan.kind != "deliver" or state.phase != P.PHASE_NORMAL:
+            return None
+        if state.me.get("verified") or cur not in ("S09", "S10", "S11"):
+            return None
+        base = state.me.get("taskScore", 0) or 0
+        if not (90 <= base < 120):
+            return None
+        best = None
+        for t in state.claimable_tasks():
+            if t.get("nodeId") != cur or (t.get("score", 0) or 0) <= 0:
+                continue
+            if t.get("taskTemplateId") in ("T04", "T06"):
+                continue
+            proc = t.get("processRound", 4) or 4
+            if proc > 6 or proc > plan.slack:
+                continue
+            expire = t.get("expireRound") or 0
+            if expire and state.round + proc > expire:
+                continue
+            if self.planner._opp_processing_task(state, t):
+                continue
+            best_key = (best.get("score", 0), -(best.get("processRound", 4) or 4)) \
+                if best else None
+            if best is None or (t.get("score", 0), -proc) > best_key:
+                best = t
+        return best
 
     def _contested_claim_first(self, state, cur, plan):
         """任务前的稀缺资源保卫：对手赶得上在我们读条期间偷走时，先领。"""
