@@ -237,6 +237,8 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_DENIAL_TASK_MIN = 60
     GUARD_DENIAL_TASK_GAP = 15
     GUARD_BOUNTY_EXPOSE_ETA = 30  # 30 帧后破卡会生成/结算悬赏，领先局避开送分卡
+    GUARD_MIN_ARRIVAL_DEFENSE = 3
+    GUARD_REAR_MIN_ARRIVAL_DEFENSE = 4
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
@@ -308,6 +310,7 @@ class PlannerStrategy(BaselineStrategy):
         self._rush_tactic_tried = False  # 护果令只尝试一次，被拒也不无限重试
         self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
         self._guard_first_seen = {}  # nodeId -> 首见该敌卡的帧（临别卡宽限计时）
+        self._guard_leave_probe = {} # nodeId -> 强通前离场预判开始帧
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
         # 上次强制通行到达节点。6.3.2 重复限制的准确语义（V3.18 修正）：
         # "主车队停在该节点时不能再次提交强制通行，离开后又回到该节点时仍不能提交"
@@ -324,6 +327,7 @@ class PlannerStrategy(BaselineStrategy):
         self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
         self._window_draw_pressure = {}  # (target, type) -> (累计平局压力, 最近帧)
+        self._window_suppress_until = {} # (target, type) -> 服务器重复平局抑制到期帧
         self._rng = None                 # (matchId, playerId) 派生种子，回放可复现
         self._opp_stationary = (None, 0)  # (对手停靠节点, 起始帧)——驻扎判定
         self._fwd_rush = False           # 冲锋型对手识别结论（粘性）
@@ -400,6 +404,7 @@ class PlannerStrategy(BaselineStrategy):
         for node_id in list(self._guard_first_seen):
             if not state.enemy_guard(node_id):
                 del self._guard_first_seen[node_id]
+                self._guard_leave_probe.pop(node_id, None)
         # 对手驻扎追踪（V3.19）：停靠在同一节点的起始帧，供"坐地户免宽限"
         # 与画像分类器用（原始口径：含做任务帧）
         opp = state.opp
@@ -448,6 +453,10 @@ class PlannerStrategy(BaselineStrategy):
                  if state.round - r > self.WINDOW_DRAW_PRESSURE_DECAY]
         for k in stale:
             del self._window_draw_pressure[k]
+            self._window_suppress_until.pop(k, None)
+        for k, until in list(self._window_suppress_until.items()):
+            if state.round > until:
+                del self._window_suppress_until[k]
         for e in state.events:
             self._record_window_draw_pressure(state, e)
             if e.get("type") != "WINDOW_CARD_REVEAL":
@@ -494,6 +503,7 @@ class PlannerStrategy(BaselineStrategy):
 
     WINDOW_DRAW_PRESSURE_DECAY = 90
     WINDOW_DRAW_BREAK_AFTER = 2
+    WINDOW_SUPPRESS_FALLBACK = 15
 
     def _record_window_draw_pressure(self, state, event):
         etype = event.get("type")
@@ -504,10 +514,30 @@ class PlannerStrategy(BaselineStrategy):
         if etype in ("WINDOW_CONTEST_DRAW", "WINDOW_CONTEST_REPEAT_SUPPRESSED"):
             count, _ = self._window_draw_pressure.get(key, (0, state.round))
             self._window_draw_pressure[key] = (count + 1, state.round)
+            if etype == "WINDOW_CONTEST_REPEAT_SUPPRESSED":
+                until = self._window_suppress_until_round(p)
+                if until is None:
+                    until = state.round + self.WINDOW_SUPPRESS_FALLBACK
+                self._window_suppress_until[key] = max(
+                    until, self._window_suppress_until.get(key, -1))
         elif etype in ("DOCK_CONTEST_WIN", "TASK_CONTEST_WIN",
                        "RESOURCE_CONTEST_WIN", "GATE_CONTEST_WIN",
                        "OBSTACLE_CONTEST_WIN"):
             self._window_draw_pressure.pop(key, None)
+            self._window_suppress_until.pop(key, None)
+
+    @staticmethod
+    def _window_suppress_until_round(payload):
+        for key in ("suppressUntilRound", "suppressUntil", "suppressedUntil",
+                    "blockedUntilRound", "blockedUntil", "retryUntilRound",
+                    "retryAfterRound", "untilRound"):
+            val = payload.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     # ---------- 对手画像（V3.20） ----------
     # 蹲点型的行为签名：在关隘型节点（KEY_PASS/PASS）上"闲着"——不在处理、不在
@@ -767,16 +797,16 @@ class PlannerStrategy(BaselineStrategy):
             return self._idle_upgrade(state, plan)
 
         # 固定处理站点必须先处理完才能离站。
-        # V3.7：不再奇偶让行 —— 对不让行的对手等于每次白送 5 帧先手，
-        # 而 S02 的 5 帧先手决定整条冰链归属（replay23 实锤）。同帧撞车
-        # 就打 DOCK 窗口：我们有 4 张兵争 + 混合出牌，期望优于必然让行；
-        # 镜像平局链由混合出牌概率性打破。
+        # 首次仍打窗口争先手；一旦 S02 DOCK 出现 DRAW/重复抑制，就退回
+        # 奇偶错峰，避免镜像对手把整局锁死在码头窗口。
         node = state.node(cur)
         needs_process = (node.get("processType") and node.get("processType") != "VERIFY"
                          and node.get("processRound", 0) > 0)
         if needs_process and not self._processed_here:
             if self._opp_processing_here(state, cur):
                 return self._idle_upgrade(state, plan)  # 排队等对手处理完，顺手用情报
+            if self._yield_process_after_draw(state, cur):
+                return self._idle_upgrade(state, plan)
             # 情报预热（V3.16）：读条 ≥4 帧的站先花 1 帧上情报（-3 净省 2）
             warm = self._intel_prewarm(state, cur, node.get("processRound", 0))
             if warm:
@@ -854,6 +884,8 @@ class PlannerStrategy(BaselineStrategy):
         if nxt is None:
             return self._idle_upgrade(state, plan)
         if state.has_obstacle(nxt) and not state.enemy_guard(nxt):
+            if self._should_wait_for_squad_clear(state, plan, nxt):
+                return P.a_wait()
             if me.get("goodFruit", 0) > 1:
                 return P.a_clear(nxt)
             return P.a_wait()
@@ -959,6 +991,12 @@ class PlannerStrategy(BaselineStrategy):
         extra = 1 if node.get("nodeType") == "GATE" else 2
         if good - base_cost - extra <= self.MIN_GOOD_RESERVE:
             return None  # 好果太紧，不做对抗投资
+        min_arrival_def = (self.GUARD_MIN_ARRIVAL_DEFENSE if choke_guard
+                           else self.GUARD_REAR_MIN_ARRIVAL_DEFENSE)
+        if (not reguard
+                and self._guard_defense_at_arrival(state, cur, extra, opp_eta)
+                < min_arrival_def):
+            return None
         if (not catchup_guard
                 and self._guard_bounty_exposure(state, cur, opp_eta, extra)):
             return None
@@ -1037,6 +1075,18 @@ class PlannerStrategy(BaselineStrategy):
         else:
             cap = 6
         return min(cap, 2 + extra * 2)
+
+    def _guard_defense_at_arrival(self, state, node_id, extra, opp_eta):
+        defense = self._guard_defense_after_set(state, node_id, extra)
+        if opp_eta <= 0:
+            return defense
+        node_type = state.node(node_id).get("nodeType")
+        first = FUNNEL_FIRST_WEATHER if (
+            node_type == "KEY_PASS" and defense >= 4) else FUNNEL_WEATHER_GAP
+        if opp_eta < first:
+            return defense
+        ticks = 1 + int((opp_eta - first) // FUNNEL_WEATHER_GAP)
+        return max(0, defense - ticks)
 
     def _rear_guard_opportunity(self, state, cur, opp_eta):
         """普通汇入点/RUSH 起点反手卡：路径必经且我们来得及读条。"""
@@ -1216,6 +1266,8 @@ class PlannerStrategy(BaselineStrategy):
     # 清零（3 帧提前量级联：早出武关 → 赶在对手到潼关起卡前上边，整段
     # 45 帧汇聚等待消失），镜像局该参数不绑定（±30% margin 恰 0）无回归
     CAMPER_GRACE = 5
+    CAMPER_LEAVE_PROBE = 3
+    CAMPER_LEAVE_REMAIN = 2
     # 驻扎判定（V3.19）：宽限的依据是"临别卡 = 刚到就起卡、次帧就走"。
     # 起卡前已在该节点驻扎 ≥ 此帧数的对手是坐地户不是过客（竞技场 camper
     # 局实测：3/24 局死于终盘差 ~20 帧，白给的 8 帧宽限是其中一截），
@@ -1255,6 +1307,11 @@ class PlannerStrategy(BaselineStrategy):
                 if not established and state.round - first < self.CAMPER_GRACE:
                     return self._idle_upgrade(state, plan)  # 宽限：等它迈步
                 node_type = state.node(target).get("nodeType")
+                if (not established and invest
+                        and self._opp_likely_leaving_guard_node(state, target)):
+                    start = self._guard_leave_probe.setdefault(target, state.round)
+                    if state.round - start < self.CAMPER_LEAVE_PROBE:
+                        return self._idle_upgrade(state, plan)
                 if not established and invest and node_type not in ("KEY_PASS", "GATE"):
                     gf, bf = invest
                     if self.log:
@@ -1372,6 +1429,35 @@ class PlannerStrategy(BaselineStrategy):
                         best = (cost, gf, bf)
         return (best[1], best[2]) if best else None
 
+    def _opp_likely_leaving_guard_node(self, state, node_id):
+        opp = state.opp or {}
+        if opp.get("nextNodeId") and opp.get("nextNodeId") != node_id:
+            return True
+        proc = opp.get("currentProcess") or {}
+        if not proc:
+            return False
+        if opp.get("state") != P.ST_PROCESSING:
+            return False
+        action = proc.get("action") or proc.get("type")
+        if action in ("SET_GUARD", "BREAK_GUARD", "SQUAD_REINFORCE"):
+            return False
+        remain = self._process_remain_round(proc)
+        if remain is None or remain > self.CAMPER_LEAVE_REMAIN:
+            return False
+        target = proc.get("targetNodeId") or proc.get("nodeId")
+        return bool(proc.get("taskId") or (target and target != node_id))
+
+    @staticmethod
+    def _process_remain_round(proc):
+        for key in ("remainRound", "remainingRound", "remain", "remaining"):
+            val = proc.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
     def _route_next_hop(self, state, cur, target):
         """与规划器共用同一套惩罚 + 天气边成本，保证走的路就是估值时算的路。
 
@@ -1406,6 +1492,18 @@ class PlannerStrategy(BaselineStrategy):
         if opp.get("state") not in (P.ST_IDLE, P.ST_WAITING):
             return False
         return (state.round + state.player_id) % 2 == 1
+
+    def _yield_process_after_draw(self, state, cur):
+        if cur != "S02":
+            return False
+        key = (cur, P.CONTEST_DOCK)
+        suppress_until = self._window_suppress_until.get(key, -1)
+        if state.round <= suppress_until:
+            return True
+        count, last_round = self._window_draw_pressure.get(key, (0, -999))
+        if count < 1 or state.round - last_round > self.WINDOW_DRAW_PRESSURE_DECAY:
+            return False
+        return self._yield_for_contention(state)
 
     @staticmethod
     def _opp_farming_here(state, node_id):
@@ -1791,6 +1889,29 @@ class PlannerStrategy(BaselineStrategy):
                 return P.a_squad_clear(clear_target)
         return None
 
+    def _can_spend_squad(self, state, cost):
+        avail = self._squad_avail(state)
+        if avail < cost:
+            return False
+        opp = state.opp
+        guard_threat = (not state.me.get("verified") and opp
+                        and not opp.get("delivered") and not opp.get("retired"))
+        floor = self.SQUAD_CORRIDOR_RESERVE if guard_threat else 0
+        return avail - cost >= floor
+
+    def _should_wait_for_squad_clear(self, state, plan, nxt):
+        if plan is None:
+            return False
+        if state.phase == P.PHASE_RUSH:
+            return False
+        if plan.kind == "task" and (plan.task or {}).get("taskTemplateId") == "T04":
+            return False
+        if not self._can_spend_squad(state, 2):
+            return False
+        if state.round - self._clear_sent.get(nxt, -999) < self.SQUAD_CLEAR_RESEND_GAP:
+            return False
+        return self._squad_clear_opportunity(state, plan) == nxt
+
     def _reinforce_opportunity(self, state):
         """给自己还有效的设卡续防守值，领先时仅救正在被攻坚的关键卡。"""
         opp = state.opp
@@ -1973,8 +2094,6 @@ class PlannerStrategy(BaselineStrategy):
         hist = self._opp_card_hist
         breaker = self._window_draw_break_card(
             state, contest, my_options, hist, beat)
-        if breaker:
-            return breaker
         pw = [hist.get(oc, 0) + 1.0 for oc in pool]
         pw_total = sum(pw)
 
@@ -1982,6 +2101,8 @@ class PlannerStrategy(BaselineStrategy):
         for card, cost in my_options:
             ev = sum(beat(card, oc) * w for oc, w in zip(pool, pw)) \
                 / pw_total * stake - cost
+            if breaker and card == breaker:
+                ev += stake + 0.5
             scored.append((ev, card))
         scored.sort(key=lambda x: -x[0])
 

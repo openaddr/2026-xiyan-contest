@@ -409,6 +409,24 @@ def test_contention():
                     sorted(acts.values()) == ["PROCESS", "PROCESS"],
                     f"{acts}")
 
+    # ---- V3.43：S02 一旦发生 DRAW，退回奇偶错峰，避免镜像窗口永动 ----
+    acts = {}
+    for pid in (1001, 2002):
+        st = PlannerStrategy()
+        st._window_draw_pressure[("S02", P.CONTEST_DOCK)] = (1, 45)
+        a = st.main_action(mirror_state(pid, 46))
+        acts[pid] = a["action"]
+    ok &= check("抢先手: S02 DRAW 后奇偶错峰",
+                sorted(acts.values()) == ["PROCESS", "WAIT"],
+                f"{acts}")
+
+    st = PlannerStrategy()
+    st._window_draw_pressure[("S02", P.CONTEST_DOCK)] = (2, 57)
+    st._window_suppress_until[("S02", P.CONTEST_DOCK)] = 71
+    a = st.main_action(mirror_state(1001, 60))
+    ok &= check("抢先手: S02 重复平局抑制期不空发 PROCESS",
+                a["action"] == "WAIT", str(a))
+
     # ---- 对手读条中：排队等待，不重复提交 ----
     gs = mirror_state(1001, 44)
     opp = gs.players[2002]
@@ -613,6 +631,26 @@ def test_breakthrough():
                 any(x["action"] == "BREAK_GUARD" and x["targetNodeId"] == "S09"
                     for x in a)
                 and not any(x["action"] == "FORCED_PASS" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 7a.1) 强通前离场预判：卡主正在做任务且剩 1 帧，先等短窗让它走，
+    #       避免强通窗口刚锁死它就离场；短窗耗尽后仍不走才拆/强通。
+    st = PlannerStrategy()
+    for i in range(st.CAMPER_GRACE):
+        st.decide(camped_ordinary_state(defense=6, good=96, bad=1,
+                                        round_no=330 + i))
+    gs_leave = camped_ordinary_state(defense=6, good=96, bad=1,
+                                     round_no=330 + st.CAMPER_GRACE)
+    for p in gs_leave.players.values():
+        if p["playerId"] != 1001:
+            p["state"] = P.ST_PROCESSING
+            p["currentProcess"] = {"action": "CLAIM_TASK", "type": "CLAIM_TASK",
+                                   "targetNodeId": "S08", "taskId": "T_X",
+                                   "remainRound": 1}
+    a = st.decide(gs_leave)
+    ok &= check("突破: 卡主快离场时先等不锁强通窗口",
+                any(x["action"] == "WAIT" for x in a)
+                and not any(x["action"] in ("BREAK_GUARD", "FORCED_PASS") for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # 7b) 临别卡宽限：卡主在宽限窗内离开 → 站在节点上白菜价攻坚
@@ -1037,6 +1075,14 @@ def test_active_guard():
     ok &= check("设卡: slack 70 档位正常开卡",
                 a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
                 str(a))
+
+    # 8) 远距设卡风化门：对手从 S10 到 S14 约 138 帧，宫门卡到达时已残，
+    #    且可能先挂悬赏；不应因全局 150 ETA 上限而提前白设。
+    a = PlannerStrategy().main_action(gs_at(cur="S14", opp_pos="S10",
+                                            round_no=260, my_score=700,
+                                            opp_score=650))
+    ok &= check("设卡: 对手太远时不到达残防不白设",
+                not (a and a["action"] == "SET_GUARD"), str(a))
     return ok
 
 
@@ -2040,6 +2086,19 @@ def test_latent_mechanics():
     plan2 = st.planner.plan(gs2)
     ok &= check("悬赏: 领先时不追（打了也不计分）", plan2.kind != "bounty", repr(plan2))
 
+    # ---- 悬赏 2b: 任务分封顶后，小分差终局不能把悬赏候选一刀切掉 ----
+    gs2b = base_state(cur="S01", my_score=700, opp_score=680)
+    gs2b.players[1001]["taskScore"] = 150
+    gs2b.nodes["S08"]["guard"] = {"ownerTeamId": "BLUE", "defense": 4,
+                                  "maxDefense": 6, "active": True}
+    gs2b.bounties = [{"bountyId": "B_S08", "bountyType": "NORMAL_BOUNTY",
+                      "nodeId": "S08", "rewardScore": 18, "active": True,
+                      "completed": False, "winnerPlayerId": 0}]
+    plan2b = PlannerStrategy().planner.plan(gs2b)
+    ok &= check("悬赏: 封顶小分差终局仍追悬赏",
+                plan2b.kind == "bounty" and plan2b.position == "S08",
+                repr(plan2b))
+
     # ---- 悬赏 3: 到达相邻节点后，既有突破逻辑接管攻坚（复用 _breakthrough）----
     gs3 = base_state(cur="S06", my_score=600, opp_score=700)
     gs3.nodes["S08"]["guard"] = {"ownerTeamId": "BLUE", "defense": 4,
@@ -2129,6 +2188,16 @@ def test_latent_mechanics():
     ok &= check("远程清障: 路上非T04障碍派小分队",
                 a == {"action": "SQUAD_CLEAR", "targetNodeId": "S08"}, str(a))
 
+    gs = base_state(cur="S06")
+    gs.nodes["S08"]["hasObstacle"] = True
+    st_clear = PlannerStrategy()
+    a_main = st_clear.main_action(gs, Plan("deliver", slack=200))
+    a_squad = st_clear.squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("远程清障: 小分队可清时主车队不烧好果 CLEAR",
+                a_main == {"action": "WAIT"}
+                and a_squad == {"action": "SQUAD_CLEAR", "targetNodeId": "S08"},
+                f"main={a_main} squad={a_squad}")
+
     # ---- 远程清障 2: 同一障碍若是我们自己在做的 T04 目标，绝不能碰 ----
     gs = base_state(cur="S01")
     gs.nodes["S08"]["hasObstacle"] = True
@@ -2136,6 +2205,12 @@ def test_latent_mechanics():
     a = PlannerStrategy().squad_action(gs, t04_plan)
     ok &= check("远程清障: 自己的T04目标绝不代劳清障",
                 a is None or a.get("action") != "SQUAD_CLEAR", str(a))
+
+    gs = base_state(cur="S01")
+    gs.players[1001]["taskScore"] = 60
+    pressure = TaskPlanner()._resource_task_pressure(gs, P.ICE_BOX, 30)
+    ok &= check("鲜度: 60-120 分阶段冰鉴绕路计任务机会成本",
+                pressure > 0, f"{pressure:.1f}")
 
     # ---- 续防 1: 落后时给风化中的自家设卡续防守值 ----
     gs = base_state(cur="S13", my_score=600, opp_score=700)
