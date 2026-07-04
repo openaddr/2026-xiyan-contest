@@ -70,4 +70,7 @@
 # 3.33 = 2744vs2617 复盘：前段任务分 0:60 落后但先到 S09 10 帧时，
 #        普通驿站旧门控 + 45 slack 把反卡机会跳过；新增追分合流卡，
 #        仅在明显任务分落后、对手即将必经、前方仍有关键关隘时低门槛设卡。
-BUILD_VERSION = "3.33-catchup-merge-guard"
+# 3.34 = replay95 复盘：高分 farmer 正在向 S10/S11 收敛时，原 farmer
+#        有界等待只覆盖 camped 读条，导致 S09+S10 白等 36 帧、同分输用时；
+#        新增零设卡高分 farmer 收敛短等封顶。
+BUILD_VERSION = "3.34-farmer-converge-walkin"

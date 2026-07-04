@@ -240,6 +240,11 @@ class PlannerStrategy(BaselineStrategy):
     # 变脸落卡，_guard_seen 立刻关死本豁免，一局至多上当一次。
     # camper / 见过卡 / 非农读条对手照旧无上限等待（V3.15 教义不动）
     TRAP_FARMER_WAIT = 25
+    # replay95：farmer 还在赶往咽喉时不会命中上面的 camped 读条门，
+    # S09+S10 合计白等 36 帧，同分输用时。高任务分、零设卡 farmer 的
+    # 收敛等待也要有预算，但比 camped 门更谨慎，只作短观察窗。
+    TRAP_FARMER_CONVERGE_WAIT = 12
+    TRAP_FARMER_CONVERGE_TASK = 90
     TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
                                 # （无界版被电池证伪 camper 34/48；有界
                                 # 变体的配对对照见 trap-gate 实验脚本）
@@ -1331,6 +1336,14 @@ class PlannerStrategy(BaselineStrategy):
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_FARM_RUSH_WAIT:
                 return give_up()
+        elif self._farmer_converge_release(state, nxt, camped, ordinary):
+            _, n_wait = self._trap_wait
+            if self._trap_wait[0] == nxt \
+                    and n_wait >= self.TRAP_FARMER_CONVERGE_WAIT:
+                if self.log:
+                    self.log.info("farmer converges to choke %s, walk-in after %d",
+                                  nxt, n_wait)
+                return False
         # farmer 咽喉有界等待（V3.29）：三重门全中才封顶——画像 farmer、
         # 全场未见其设卡、它此刻停靠在 nxt 读任务条（读条中规则上无法
         # 同帧起手 SET_GUARD）。等待超预算即走边，别把定价层已经买单的
@@ -1374,6 +1387,21 @@ class PlannerStrategy(BaselineStrategy):
         if self.log and n in (self.TRAP_WAIT_MAX, self.TRAP_WAIT_MAX * 3):
             self.log.info("trap wait at %s reached %d frames (opp %s)",
                           nxt, n, "camped" if camped else "converging")
+        return True
+
+    def _farmer_converge_release(self, state, nxt, camped, ordinary):
+        """零设卡高分 farmer 正在赶往咽喉时，等待有界，避免同分输用时。"""
+        if camped or ordinary:
+            return False
+        opp = state.opp
+        if not opp or not opp.get("routeEdgeId") or opp.get("nextNodeId") != nxt:
+            return False
+        if self._opp_profile != "farmer" or self.planner._guard_seen:
+            return False
+        if (opp.get("taskScore") or 0) < self.TRAP_FARMER_CONVERGE_TASK:
+            return False
+        if state.enemy_guard(nxt) or self._opp_setting_guard(state, nxt):
+            return False
         return True
 
     def _ordinary_converge_threat(self, state):

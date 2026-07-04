@@ -3458,7 +3458,7 @@ def test_farmer_walkin():
     with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
         inquire = json.load(f)["msg_data"]
 
-    def gs_choke(round_no, opp_proc=None, opp_task=90):
+    def gs_choke(round_no, opp_proc=None, opp_task=90, opp_moving=False):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -3472,10 +3472,18 @@ def test_farmer_walkin():
                           resources={}, freshness=90.0, goodFruit=90,
                           badFruit=0, taskScore=150, verified=False)
             else:
-                p_.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
-                          routeEdgeId=None, currentProcess=opp_proc, buffs=[],
-                          delivered=False, retired=False, taskScore=opp_task,
-                          goodFruit=90)
+                if opp_moving:
+                    p_.update(state="MOVING", currentNodeId="S08",
+                              nextNodeId="S10", routeEdgeId="E17",
+                              edgeTotalMs=24000, edgeProgressMs=0,
+                              currentProcess=None, buffs=[],
+                              delivered=False, retired=False,
+                              taskScore=opp_task, goodFruit=90)
+                else:
+                    p_.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                              routeEdgeId=None, currentProcess=opp_proc, buffs=[],
+                              delivered=False, retired=False, taskScore=opp_task,
+                              goodFruit=90)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["guard"] = None
@@ -3523,6 +3531,34 @@ def test_farmer_walkin():
         last = st.main_action(g)
     ok &= check("农夫走边: 见过卡的对手不豁免",
                 last and last["action"] == "WAIT", str(last))
+
+    def feed_converge(profile, frames, opp_task=90, guard_seen=False):
+        st = PlannerStrategy()
+        st.PROFILE_ENABLED = False
+        st._opp_profile = profile
+        st.planner._guard_seen = guard_seen
+        last = None
+        for i in range(frames):
+            g = gs_choke(300 + i, opp_task=opp_task, opp_moving=True)
+            last = st.main_action(g)
+        return last
+
+    a = feed_converge("farmer", 13)
+    ok &= check("农夫走边: 高分 farmer 收敛咽喉短等后走边（replay95 钉子）",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
+    a = feed_converge("farmer", 12)
+    ok &= check("农夫走边: farmer 收敛预算内仍等待",
+                a and a["action"] == "WAIT", str(a))
+    a = feed_converge("farmer", 20, opp_task=60)
+    ok &= check("农夫走边: 收敛任务分不足不豁免",
+                a and a["action"] == "WAIT", str(a))
+    a = feed_converge("camper", 20)
+    ok &= check("农夫走边: camper 收敛不豁免",
+                a and a["action"] == "WAIT", str(a))
+    a = feed_converge("farmer", 20, guard_seen=True)
+    ok &= check("农夫走边: 见过卡的 farmer 收敛不豁免",
+                a and a["action"] == "WAIT", str(a))
 
     def gs_farm_rusher(round_no, camped=False):
         gs = GameState(1001)
