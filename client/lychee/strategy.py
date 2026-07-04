@@ -176,7 +176,10 @@ class PlannerStrategy(BaselineStrategy):
     # 竞速模式下的收缩清单（V3.18）：只领交付硬件与速度资源
     RACE_CLAIM_ONLY = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
-    USE_ICE_BELOW = 91          # 鲜度 ≤90 就用冰鉴：+10 不溢出，且防跌破转坏阈值
+    USE_ICE_BELOW = 86          # 首关前先留 1 个坏果弹药，低到 86 左右再补冰
+    USE_ICE_LATE_BELOW = 91     # 过首关/冲刺末端不再故意养坏果，恢复保鲜阈值
+    ICE_AMMO_TARGET_BAD = 1     # 防 6 卡：1 坏果 + 2 好果即可一击破
+    ICE_PRE_AMMO_CRITICAL = 80  # 极端低鲜度兜底，避免为等坏果把鲜度打穿
 
     MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
@@ -530,6 +533,26 @@ class PlannerStrategy(BaselineStrategy):
 
     # ---------- 主车队 ----------
 
+    def _should_use_ice(self, state, plan=None):
+        me = state.me
+        res = me.get("resources") or {}
+        if res.get(P.ICE_BOX, 0) <= 0:
+            return False
+        fresh = me.get("freshness", 100) or 0
+        if fresh <= 0:
+            return False
+        cur = me.get("currentNodeId")
+        if not cur:
+            return False
+        bad = me.get("badFruit", 0) or 0
+        key_ahead = self.planner._key_pass_ahead(state, cur)
+        late = (cur == state.terminal_node or me.get("verified")
+                or state.phase == P.PHASE_RUSH or not key_ahead)
+        if key_ahead and not late and bad < self.ICE_AMMO_TARGET_BAD:
+            return fresh < self.ICE_PRE_AMMO_CRITICAL
+        threshold = self.USE_ICE_LATE_BELOW if late else self.USE_ICE_BELOW
+        return fresh < threshold
+
     def main_action(self, state, plan=None):
         me = state.me
         if not me or me.get("retired") or me.get("delivered"):
@@ -586,11 +609,11 @@ class PlannerStrategy(BaselineStrategy):
         verified = me.get("verified")
         plan = plan or self.planner.plan(state)
 
-        # 保鲜优先于一切等待/交付：+10 鲜度 ≈ 18 分，交付前一帧用也稳赚，
-        # 且在宫门等 RUSH、终点等交付的空闲帧里防止跌破转坏阈值
-        res = me.get("resources") or {}
-        if me.get("freshness", 100) < self.USE_ICE_BELOW and res.get(P.ICE_BOX, 0) > 0:
+        # 冰鉴不再抢在第一颗坏果前吃：坏果是关隘攻坚弹药，零坏果会把
+        # 防 6 卡从"一击破"变成削弱/强通。拿到 1 个坏果后再补鲜度。
+        if self._should_use_ice(state, plan):
             return P.a_use_resource(P.ICE_BOX)
+        res = me.get("resources") or {}
 
         # 终点交付
         if cur == terminal:
@@ -1118,7 +1141,23 @@ class PlannerStrategy(BaselineStrategy):
         opp = state.opp
         return bool(opp and not opp.get("delivered") and not opp.get("retired")
                     and not opp.get("routeEdgeId")
-                    and opp.get("currentNodeId") == node_id)
+                    and opp.get("currentNodeId") == node_id
+                    and not PlannerStrategy._opp_forced_passing_from(state, node_id))
+
+    @staticmethod
+    def _opp_forced_passing_from(state, node_id):
+        """对手正在从 node_id 强通离开：currentNodeId 仍显示 node_id，但已不能设卡。"""
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        proc = opp.get("currentProcess") or {}
+        action = proc.get("action") or proc.get("type")
+        target = proc.get("targetNodeId")
+        return bool(not opp.get("routeEdgeId")
+                    and opp.get("currentNodeId") == node_id
+                    and (opp.get("state") == P.ST_FORCED_PASSING
+                         or action == "FORCED_PASS")
+                    and target and target != node_id)
 
     def _intel_prewarm(self, state, target, proc_frames):
         """处理/验核前先上情报（读条 -3，最低 2）：读条 ≥4 帧净省 ≥1。
@@ -1199,6 +1238,8 @@ class PlannerStrategy(BaselineStrategy):
             return give_up()
         risk = False
         if camped:
+            if self._opp_forced_passing_from(state, nxt):
+                return give_up()
             # 短边豁免（V3.18）：设卡读条 4 帧、完成次帧生效——边长 ≤4 帧
             # 时它当帧起手也赶不上我们过完边（正在读条的情形由上游
             # _opp_setting_guard 分支拦截）。规则数学可证，不是赌

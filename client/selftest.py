@@ -228,16 +228,32 @@ def test_planner():
                 kinds.get("SQUAD_SCOUT", {}).get("targetNodeId") == "S14",
                 json.dumps(a, ensure_ascii=False))
 
-    # ---- 场景1c: 冰鉴鲜度 ≤90 就用（防跌破转坏阈值） ----
+    # ---- 场景1c: 首关前零坏果时不抢在 90 阈值前吃冰 ----
     gs = make_state()
     for p in gs.players.values():
         if p["playerId"] == 1001:
             p["freshness"] = 88.0
             p["resources"] = {"ICE_BOX": 1}
+            p["badFruit"] = 0
     gs.tasks = []  # 排除任务干扰
     a = PlannerStrategy().main_action(gs)
-    ok &= check("保鲜: 鲜度88即用冰鉴",
-                a and a["action"] == "USE_RESOURCE" and a["resourceType"] == "ICE_BOX",
+    ok &= check("保鲜: 首关前零坏果不急用冰",
+                not (a and a["action"] == "USE_RESOURCE"
+                     and a["resourceType"] == "ICE_BOX"),
+                str(a))
+
+    # ---- 场景1c2: 已有 1 个坏果弹药后，鲜度到 86 左右再补冰 ----
+    gs = make_state()
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["freshness"] = 85.5
+            p["resources"] = {"ICE_BOX": 1}
+            p["badFruit"] = 1
+    gs.tasks = []
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("保鲜: 有坏果后 86 附近补冰",
+                a and a["action"] == "USE_RESOURCE"
+                and a["resourceType"] == "ICE_BOX",
                 str(a))
 
     # ---- 场景1d: 已持有 1 个冰鉴仍可再领（上限 2） ----
@@ -1329,6 +1345,38 @@ def test_trap_proof():
         gs.on_inquire(d)
         return gs
 
+    def gs_s09_opp_forced():
+        """replay93: 我在 S09，要进 S10；对手已从 S10 强通离开。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 330
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S09", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=88.0, goodFruit=94,
+                         badFruit=1, taskScore=90, squadAvailable=1)
+            else:
+                p.update(state=P.ST_FORCED_PASSING, currentNodeId="S10",
+                         nextNodeId=None, routeEdgeId=None,
+                         currentProcess={"action": "FORCED_PASS",
+                                         "type": "FORCED_PASS",
+                                         "targetNodeId": "S11",
+                                         "remainRound": 30},
+                         delivered=False, retired=False, goodFruit=94,
+                         badFruit=1, taskScore=90)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
     # 0) V3.12 删证据门回归：对手从未设卡，但它占着我们的咽喉下一跳 →
     #    照样等待。首卡必然没有前科（replay36: 2614 全场首卡掐上边冻 195 帧
     #    零交付），误伤上界为对手真实停留时长 << 冻结 180+ 帧
@@ -1364,6 +1412,11 @@ def test_trap_proof():
         gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08"))
     ok &= check("防陷阱: 对手离开后正常推进",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S11", str(a))
+
+    # 3b) replay93：强通离开中的对手不能在原节点设卡，别把 S10 当蹲点
+    a = PlannerStrategy().main_action(gs_s09_opp_forced())
+    ok &= check("防陷阱: 对手强通离开原节点时不误等",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10", str(a))
 
     # 4) 它留了卡 → 站在节点上攻坚拆（好果2×2+坏果2×3=10 ≥ 6）
     a = PlannerStrategy().main_action(
@@ -3237,6 +3290,56 @@ def test_front_tempo_tail_follow():
     ok &= check("前段尾随: 可秒破时咽喉阴影降档",
                 pen_rich("S10") + 10 < pen_poor("S10"),
                 f"poor={pen_poor('S10'):.1f} rich={pen_rich('S10'):.1f}")
+
+    def gs_replay93(cur, base, tasks, opp_cur, opp_next, opp_edge):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = 100, "NORMAL"
+        d["contests"] = []
+        d["weather"] = {"active": [], "forecast": []}
+        d["tasks"] = list(tasks)
+        edge_total = gs.graph.edge_total_move(gs.graph.edges[opp_edge])
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=94.0, goodFruit=95,
+                         badFruit=0, taskScore=base, verified=False)
+            else:
+                p.update(state="MOVING", currentNodeId=opp_cur,
+                         nextNodeId=opp_next, routeEdgeId=opp_edge,
+                         edgeTotalMs=edge_total, edgeProgressMs=edge_total - 5000,
+                         currentProcess=None, buffs=[],
+                         delivered=False, retired=False, taskScore=0)
+        for n in d["nodes"]:
+            n["hasObstacle"] = n["nodeId"] in {"S06", "S08"}
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    t_s06 = {"taskId": "T_S06_ONLY", "taskTemplateId": "T04",
+             "nodeId": "S06", "processRound": 6, "score": 30,
+             "expireRound": 300, "active": True, "completed": False,
+             "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
+             "routeBucket": P.MOUNTAIN}
+    gs = gs_replay93("S03", 30, (t_s06,), "S02", "S03", "E02")
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("前段保速: S03 已拿30后不做 S06 山路清障",
+                plan.kind != "task", repr(plan))
+
+    t_s07 = {"taskId": "T_S07_OVER", "taskTemplateId": "T01",
+             "nodeId": "S07", "processRound": 4, "score": 30,
+             "expireRound": 320, "active": True, "completed": False,
+             "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
+             "routeBucket": P.ROAD}
+    gs = gs_replay93("S07", 120, (t_s07,), "S07", "S09", "E04")
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("前段保速: S07 到120后先抢 S10 不贪到150",
+                plan.kind != "task", repr(plan))
     return ok
 
 

@@ -68,8 +68,13 @@ FRONT_TEMPO_PROGRESS_CUT = 0.22
 FRONT_TEMPO_BASE_CAP = 90
 FRONT_TEMPO_OPP_LEAD = 3
 FRONT_TEMPO_BLOCK_ROUTE_TYPES = {P.MOUNTAIN}
+FRONT_TEMPO_KEEP_LEAD_TRAIL = -30
+FRONT_TEMPO_KEYPASS_BASE_CAP = 120
+FRONT_TEMPO_KEYPASS_TASK_ROUTES = {P.ROAD}
 LATE_RESOURCE_PROGRESS = 0.62
 LATE_RESOURCE_MULT = 1.25
+ICE_AMMO_TARGET_BAD = 1
+ICE_PRE_AMMO_VALUE_MULT = 0.72
 BREAK_GUARD_EXPECT_DEFENSE = 6
 BREAK_SHADOW_CHOKE_MULT = 0.35
 BREAK_FUNNEL_TAX_MULT = 0.45
@@ -310,8 +315,12 @@ class TaskPlanner:
         self.FRONT_TEMPO_PROGRESS_CUT = FRONT_TEMPO_PROGRESS_CUT
         self.FRONT_TEMPO_BASE_CAP = FRONT_TEMPO_BASE_CAP
         self.FRONT_TEMPO_OPP_LEAD = FRONT_TEMPO_OPP_LEAD
+        self.FRONT_TEMPO_KEEP_LEAD_TRAIL = FRONT_TEMPO_KEEP_LEAD_TRAIL
+        self.FRONT_TEMPO_KEYPASS_BASE_CAP = FRONT_TEMPO_KEYPASS_BASE_CAP
         self.LATE_RESOURCE_PROGRESS = LATE_RESOURCE_PROGRESS
         self.LATE_RESOURCE_MULT = LATE_RESOURCE_MULT
+        self.ICE_AMMO_TARGET_BAD = ICE_AMMO_TARGET_BAD
+        self.ICE_PRE_AMMO_VALUE_MULT = ICE_PRE_AMMO_VALUE_MULT
         self.BREAK_GUARD_EXPECT_DEFENSE = BREAK_GUARD_EXPECT_DEFENSE
         self.BREAK_SHADOW_CHOKE_MULT = BREAK_SHADOW_CHOKE_MULT
         self.BREAK_FUNNEL_TAX_MULT = BREAK_FUNNEL_TAX_MULT
@@ -663,7 +672,7 @@ class TaskPlanner:
         bonus, frames = 0.0, 0
         node = state.nodes.get(pos) or {}
         for rtype, value in stock_claimables(node):
-            v = self._resource_phase_value(state, pos, value) \
+            v = self._resource_phase_value(state, pos, value, rtype) \
                 * race_discount(pos, my_raw.get(pos, 0))
             if pos in opp_path:
                 v *= DENIAL_FACTOR
@@ -674,7 +683,8 @@ class TaskPlanner:
             nb_node = state.nodes.get(nb) or {}
             for rtype, value in stock_claimables(nb_node):
                 eta = my_raw.get(pos, 0) + frames + node_raw.get(nb, 0)
-                v = CHAIN_WEIGHT * self._resource_phase_value(state, nb, value) \
+                v = CHAIN_WEIGHT \
+                    * self._resource_phase_value(state, nb, value, rtype) \
                     * race_discount(nb, eta)
                 if nb in opp_path:
                     v *= DENIAL_FACTOR
@@ -708,7 +718,7 @@ class TaskPlanner:
                 detour = max(0, f_to + f_back - to_gate) + CLAIM_FRAMES
                 if self._time_detour(state, cur, node_id) + CLAIM_FRAMES > slack:
                     continue  # 硬约束用时间口径
-                v = self._resource_phase_value(state, node_id, value) \
+                v = self._resource_phase_value(state, node_id, value, rtype) \
                     * race_discount(node_id, my_raw.get(node_id, 0))
                 if node_id in opp_path:
                     v *= DENIAL_FACTOR      # 抢的是对手碗里的
@@ -724,7 +734,7 @@ class TaskPlanner:
                         if nb in opp_path:
                             val2 = val2 * DENIAL_FACTOR
                         chain += CHAIN_WEIGHT \
-                            * self._resource_phase_value(state, nb, val2) * d2
+                            * self._resource_phase_value(state, nb, val2, rt2) * d2
                 # 资源不计漏斗差（V3.16）也不计竞速溢价（V3.18）：资源面值
                 # ≤19，漏斗模型在竞速带附近的到达估计噪声（±2 帧出发差 →
                 # ±40 帧期望费）会淹没它们；路线级灾难（36/56/57 山路口袋）
@@ -770,6 +780,9 @@ class TaskPlanner:
             return None
         if self._front_tempo_task_blocked(state, task, cur, pos, speed,
                                           penalty, ecost, base):
+            return None
+        if self._keypass_tempo_task_blocked(state, task, cur, pos, speed,
+                                            penalty, ecost, base):
             return None
         f_to += self._backtrack_tax(state, cur, pos)
 
@@ -1026,6 +1039,45 @@ class TaskPlanner:
                 return True
         return False
 
+    def _front_tempo_contested(self, state, cur):
+        """前半程身位仍在同屏竞争：领先也要保速，不能把路权农回去。"""
+        opp = state.opp or {}
+        if opp.get("delivered") or opp.get("retired"):
+            return False
+        if self._map_progress(state, cur) >= self.LATE_RESOURCE_PROGRESS:
+            return False
+        if self._opp_on_my_forward_path(state, cur):
+            return True
+        opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if opp_pos == cur:
+            return True
+        return self._opp_gate_lead(state, cur) >= -self.FRONT_TEMPO_KEEP_LEAD_TRAIL
+
+    def _task_route_bucket(self, state, task, pos):
+        bucket = task.get("routeBucket") or task.get("routeType")
+        if bucket:
+            return bucket
+        node_id = task.get("nodeId") or pos
+        if node_id and pos and node_id != pos:
+            edge = state.graph.edge_between(pos, node_id)
+            if edge:
+                return edge.get("routeType")
+        return None
+
+    def _keypass_tempo_task_blocked(self, state, task, cur, pos, speed,
+                                    penalty, ecost, base):
+        """首个关键关前的节奏闸门：120 分够进 S10，非官道先让。"""
+        if not self.FRONT_TEMPO_ENABLED or state.phase != P.PHASE_NORMAL:
+            return False
+        if not self._front_tempo_contested(state, cur):
+            return False
+        if not self._key_pass_ahead(state, cur, penalty, ecost):
+            return False
+        bucket = self._task_route_bucket(state, task, pos)
+        if bucket and bucket not in FRONT_TEMPO_KEYPASS_TASK_ROUTES:
+            return True
+        return (base or 0) >= self.FRONT_TEMPO_KEYPASS_BASE_CAP
+
     def _front_tempo_task_blocked(self, state, task, cur, pos, speed,
                                   penalty, ecost, base):
         """早段路线承诺闸门：低进度/山线任务先让，等 S07/S10 波次补分。"""
@@ -1070,8 +1122,13 @@ class TaskPlanner:
             else self._expected_guard_defense(state, node_id)
         return self._break_capacity(state) >= defense
 
-    def _resource_phase_value(self, state, node_id, value):
+    def _resource_phase_value(self, state, node_id, value, rtype=None):
         """中后段硬件资源加权：前段保推进，后段补鲜度/速度。"""
+        if rtype == P.ICE_BOX \
+                and (state.me.get("badFruit", 0) or 0) < self.ICE_AMMO_TARGET_BAD \
+                and state.phase == P.PHASE_NORMAL \
+                and self._key_pass_ahead(state, node_id):
+            value *= self.ICE_PRE_AMMO_VALUE_MULT
         if self._map_progress(state, node_id) >= self.LATE_RESOURCE_PROGRESS:
             return value * self.LATE_RESOURCE_MULT
         return value
