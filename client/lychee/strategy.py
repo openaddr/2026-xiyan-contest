@@ -12,6 +12,15 @@ from . import protocol as P
 from .planner import (TaskPlanner, FUNNEL_FIRST_WEATHER,
                       FUNNEL_WEATHER_GAP)
 
+# 对手手册（V3.24）：按对手 playerId 应用赛前预设。前推偏置全局默认开
+# 被电池证伪（camper 未交付 4→10——开局提速重掷与蹲点者起卡周期的相位
+# 骰子），但对官道冲锋型对手价值巨大（vs toller margin +32→+248，代价
+# 2/48）。第一名 2839（lychee-py，边冲边农+汇入点回手卡，四局逐帧复刻
+# 般确定）是该预设的实锤适用对象。键 = 对手 playerId（开局即知）
+OPPONENT_BOOK = {
+    2839: {"planner.FORWARD_BIAS_FLOOR": 0.6},   # 第一名：官道冲锋型
+}
+
 
 class Strategy:
     def on_start(self, state):
@@ -265,6 +274,7 @@ class PlannerStrategy(BaselineStrategy):
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
         self._rng = None                 # (matchId, playerId) 派生种子，回放可复现
         self._opp_stationary = (None, 0)  # (对手停靠节点, 起始帧)——驻扎判定
+        self._book_applied = False       # 对手手册预设只应用一次
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
         self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
         self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
@@ -323,6 +333,19 @@ class PlannerStrategy(BaselineStrategy):
             self.planner.back_node = prev_station
             self.planner.back_until = state.round + 40
         self._weaken_target = None
+
+        # 对手手册（V3.24）：首帧按对手 playerId 应用赛前预设（只一次）
+        if not self._book_applied:
+            self._book_applied = True
+            preset = OPPONENT_BOOK.get(getattr(state, "opp_id", None))
+            if preset:
+                for key, val in preset.items():
+                    scope, attr = key.split(".", 1)
+                    obj = self.planner if scope == "planner" else self
+                    setattr(obj, attr, val)
+                if self.log:
+                    self.log.info("opponent book applied for %s: %r",
+                                  state.opp_id, preset)
 
         # 敌卡消失（被拆/风化/失效）即重置宽限计时：同节点再立新卡重新起算
         for node_id in list(self._guard_first_seen):

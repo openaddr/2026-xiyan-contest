@@ -2575,6 +2575,33 @@ def test_contest_phase():
     ok &= check("分段折扣: 对手已交付不折扣",
                 r_done is not None and r_done[0] > r_on[0],
                 f"done={r_done} post={r_on}")
+
+    # ---- 前推偏置 + 对手手册（V3.24）----
+    import lychee.strategy as SMOD
+    # 5) 因子语义：开局节点吃地板、宫门方向趋近 1、默认关=恒 1
+    gs = gs_cp("S07", "S01")
+    pl_fb = TaskPlanner()
+    ok &= check("前推: 默认关恒等于 1",
+                pl_fb._forward_factor(gs, "S02") == 1.0, "")
+    pl_fb2 = TaskPlanner()
+    pl_fb2.FORWARD_BIAS_FLOOR = 0.6
+    f_early = pl_fb2._forward_factor(gs, "S02")
+    f_late = pl_fb2._forward_factor(gs, "S13")
+    ok &= check("前推: 开局节点降权且后段趋近 1",
+                f_early < 0.75 < 0.9 < f_late, f"S02={f_early:.2f} S13={f_late:.2f}")
+    # 6) 对手手册：opp_id 命中预设 → 首帧应用到 planner
+    SMOD.OPPONENT_BOOK[2002] = {"planner.FORWARD_BIAS_FLOOR": 0.6}
+    try:
+        st = PlannerStrategy()
+        st._absorb_feedback(gs_cp("S07", "S09"))
+        ok &= check("手册: 命中对手应用预设",
+                    st.planner.FORWARD_BIAS_FLOOR == 0.6, "")
+    finally:
+        del SMOD.OPPONENT_BOOK[2002]
+    st2 = PlannerStrategy()
+    st2._absorb_feedback(gs_cp("S07", "S09"))
+    ok &= check("手册: 未命中保持默认",
+                st2.planner.FORWARD_BIAS_FLOOR == 1.0, "")
     return ok
 
 

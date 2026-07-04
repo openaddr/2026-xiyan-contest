@@ -37,6 +37,16 @@ CONTEST_GRACE_DISCOUNT = 0.9
 # 不可能被抢（7.4 + 交付队伍跳过主动作）。0.5 只该活在关前竞速段
 POST_CHOKE_CONTEST_DISCOUNT = 0.9   # 关后：P≈0.98 × 湿件谦逊
 CONTEST_PHASE_ENABLED = True
+# 前推偏置（V3.24，用户指令：前期节点降权、优先冲走廊、后面的资源更
+# 重要）：任务价值 × 地图进度系数——progress = 1 - 该点到宫门裸帧 /
+# 起点到宫门裸帧，系数 = FLOOR + (1-FLOOR)×progress。语料依据：2839
+# 边冲边农（S07/S10/S11 沿途农同样的 150 分），我们 S03 停留 15 帧在
+# 悬崖带射程（ETA≤125）之外，seed4/23 深链死局皆源于开局段落后。
+# 只作用于任务：资源口径不动（冰链血泪资产、马匹 T06 经济）
+FORWARD_BIAS_FLOOR = 1.0    # 1.0 = 关闭；扫描定参后改默认
+FORWARD_BIAS_CUT = 0.0      # >0 时改用阶跃：进度 < CUT 的节点吃 FLOOR，
+                            # 之后完全不动（只压真正的开局簇，不扰动
+                            # 走廊邻近农任务的时序）
 # 阻挡节点的寻路惩罚按真实处理代价估：会计入 ETA，不能虚高
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
@@ -227,6 +237,9 @@ class TaskPlanner:
         self.POST_CHOKE_CONTEST_DISCOUNT = POST_CHOKE_CONTEST_DISCOUNT
         self.CONTEST_PHASE_ENABLED = CONTEST_PHASE_ENABLED
         self._choke_ahead_cache = (-1, False)
+        self.FORWARD_BIAS_FLOOR = FORWARD_BIAS_FLOOR
+        self.FORWARD_BIAS_CUT = FORWARD_BIAS_CUT
+        self._fwd_total = None
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
         self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
@@ -674,6 +687,10 @@ class TaskPlanner:
             return None
 
         value = marginal_task_value(base, task.get("score", 0))
+        # 前推偏置（V3.24）：前期节点的任务降权，优先把身位往走廊冲——
+        # 同样的分数在沿途更靠前的波次里农回来（2839 打法），开局停留
+        # 是深链死局的第一环
+        value *= self._forward_factor(state, pos)
         # 对手风险：对手离任务点更近时打折；对手正在处理该任务则放弃。
         # 离路软化（V3.10.1）：任务点不在对手合理走廊上时，它专程绕来抢的
         # 概率低（与资源折扣对称）——曾把走官道的 2614 判定会来抢山地任务
@@ -804,6 +821,29 @@ class TaskPlanner:
             self._cliff_choke = None
         self._cliff_cache = (state.round, active)
         return active
+
+    def _forward_factor(self, state, node_id):
+        """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
+        floor = self.FORWARD_BIAS_FLOOR
+        if floor >= 1.0:
+            return 1.0
+        total = self._fwd_total
+        if total is None:
+            d, p = state.graph.shortest_path(
+                state.start_node, state.gate_node, P.BASE_SPEED) \
+                if state.start_node else (None, None)
+            total = d if p else 0
+            self._fwd_total = total
+        if not total:
+            return 1.0
+        remain, path = state.graph.shortest_path(
+            node_id, state.gate_node, P.BASE_SPEED)
+        if not path:
+            return 1.0
+        progress = max(0.0, min(1.0, 1.0 - remain / total))
+        if self.FORWARD_BIAS_CUT > 0:
+            return floor if progress < self.FORWARD_BIAS_CUT else 1.0
+        return floor + (1.0 - floor) * progress
 
     def _choke_ahead(self, state):
         """前方是否还有咽喉（漏斗 ctx 存在）——争夺折扣的阶段判定。"""
