@@ -305,6 +305,7 @@ class PlannerStrategy(BaselineStrategy):
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
         self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
+        self._window_draw_pressure = {}  # (target, type) -> (累计平局压力, 最近帧)
         self._rng = None                 # (matchId, playerId) 派生种子，回放可复现
         self._opp_stationary = (None, 0)  # (对手停靠节点, 起始帧)——驻扎判定
         self._fwd_rush = False           # 冲锋型对手识别结论（粘性）
@@ -424,7 +425,12 @@ class PlannerStrategy(BaselineStrategy):
 
         # 对手出牌画像（V3.18）：WINDOW_CARD_REVEAL 全公开，本局频率替代
         # "对可负担集均匀出牌"的先验（pick_card 拉普拉斯平滑加权）
+        stale = [k for k, (_, r) in self._window_draw_pressure.items()
+                 if state.round - r > self.WINDOW_DRAW_PRESSURE_DECAY]
+        for k in stale:
+            del self._window_draw_pressure[k]
         for e in state.events:
+            self._record_window_draw_pressure(state, e)
             if e.get("type") != "WINDOW_CARD_REVEAL":
                 continue
             p = e.get("payload") or {}
@@ -458,6 +464,31 @@ class PlannerStrategy(BaselineStrategy):
                     if self.log:
                         self.log.info("blacklist task %s until r%d (%s)",
                                       tid, state.round + 40, code)
+
+    @staticmethod
+    def _window_pressure_key(payload):
+        target = payload.get("targetNodeId") or payload.get("nodeId")
+        ctype = payload.get("contestType")
+        if not target or not ctype:
+            return None
+        return (target, ctype)
+
+    WINDOW_DRAW_PRESSURE_DECAY = 90
+    WINDOW_DRAW_BREAK_AFTER = 2
+
+    def _record_window_draw_pressure(self, state, event):
+        etype = event.get("type")
+        p = event.get("payload") or {}
+        key = self._window_pressure_key(p)
+        if not key:
+            return
+        if etype in ("WINDOW_CONTEST_DRAW", "WINDOW_CONTEST_REPEAT_SUPPRESSED"):
+            count, _ = self._window_draw_pressure.get(key, (0, state.round))
+            self._window_draw_pressure[key] = (count + 1, state.round)
+        elif etype in ("DOCK_CONTEST_WIN", "TASK_CONTEST_WIN",
+                       "RESOURCE_CONTEST_WIN", "GATE_CONTEST_WIN",
+                       "OBSTACLE_CONTEST_WIN"):
+            self._window_draw_pressure.pop(key, None)
 
     # ---------- 对手画像（V3.20） ----------
     # 蹲点型的行为签名：在关隘型节点（KEY_PASS/PASS）上"闲着"——不在处理、不在
@@ -1761,6 +1792,10 @@ class PlannerStrategy(BaselineStrategy):
         # 对手出牌频率加权（V3.18）：拉普拉斯 +1 平滑，无观测退化为均匀。
         # 真实对手有出牌偏好（demo 2614：窗口全弃权），均匀假设在扔信息
         hist = self._opp_card_hist
+        breaker = self._window_draw_break_card(
+            state, contest, my_options, hist, beat)
+        if breaker:
+            return breaker
         pw = [hist.get(oc, 0) + 1.0 for oc in pool]
         pw_total = sum(pw)
 
@@ -1785,3 +1820,37 @@ class PlannerStrategy(BaselineStrategy):
         best_ev = scored[0][0]
         ties = [card for ev, card in scored if best_ev - ev <= self.CARD_TIE_EPS]
         return rng.choice(ties)
+
+    def _window_draw_break_card(self, state, contest, my_options, hist, beat):
+        """重复平局后跳出镜像牌型；只处理已被证实卡住的 S02 固定处理窗。"""
+        key = self._window_pressure_key(contest)
+        if key != ("S02", P.CONTEST_DOCK):
+            return None
+        count, last_round = self._window_draw_pressure.get(key, (0, -999))
+        if count < self.WINDOW_DRAW_BREAK_AFTER \
+                or state.round - last_round > self.WINDOW_DRAW_PRESSURE_DECAY:
+            return None
+        option_cards = [card for card, _ in my_options]
+
+        if hist:
+            dominant = max(hist.items(), key=lambda kv: kv[1])[0]
+            counters = [card for card in option_cards
+                        if card != P.CARD_ABSTAIN and beat(card, dominant) > 0]
+            if counters:
+                return counters[0]
+
+        red = contest.get("redPlayerId") == state.player_id
+        blue = contest.get("bluePlayerId") == state.player_id
+        if not red and not blue:
+            red = (state.player_id % 2 == 0)
+        flip = (count // 4) % 2 == 1
+        if red ^ flip:
+            prefs = (P.CARD_BING_ZHENG, P.CARD_QIANG_XING,
+                     P.CARD_XIAN_GONG, P.CARD_YAN_DIE, P.CARD_ABSTAIN)
+        else:
+            prefs = (P.CARD_XIAN_GONG, P.CARD_QIANG_XING,
+                     P.CARD_BING_ZHENG, P.CARD_YAN_DIE, P.CARD_ABSTAIN)
+        for card in prefs:
+            if card in option_cards:
+                return card
+        return None

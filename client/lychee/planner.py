@@ -71,11 +71,13 @@ FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（st
 # 山线停留，不拦官道跟随。过了中段后硬件资源价值上调，补回前面放弃的
 # 非关键经济。V3.32 审计：陪练电池无 2986 官道型代表曾实测净负关闭；
 # V3.35 恢复山路轻门（平台 lose 批次最稳定负样本：已有基础分后被
-# S06/S08 山路拖走）；V3.91 补齐 RoadFarmerBot 语料后复证全量门：
+# S06/S08 山路拖走）；V3.37 走廊跟随轻门（平台 15 局 6 败：对手已提交
+# 走廊后仍为眼前任务反切另一条线——按 routeEdge/站位证据拦离站反切，
+# 水路不作跟随证据）；V3.91 补齐 RoadFarmerBot 语料后复证全量门：
 # 对官道农形态收益决定性（12 种子总 margin 5130→6305、交付
 # r515-585→r475-490），亏损集中在 camper/rusher/toller 误开火 →
-# 按"farmer 模式+零设卡+富点干等实锤"门控启用。两门并存：全量门
-# 只对干等实锤纯农开火；山路轻门覆盖其余形态（用 raw 竞争判定，
+# 按"farmer 模式+零设卡+富点干等实锤"门控启用。多门并存：全量门
+# 只对干等实锤纯农开火；各轻门覆盖其余形态（一律用 raw 竞争判定，
 # 不吃形态门）
 FRONT_TEMPO_ENABLED = True
 FRONT_TEMPO_MOUNTAIN_RECOVERY = True
@@ -91,6 +93,20 @@ FRONT_TEMPO_KEYPASS_TASK_ROUTES = {P.ROAD}
 # 两者唯一的行为分水岭。strategy._profile_tick 逐帧累计（停留 ≥5 帧后
 # 的无读条帧才计，滤过路噪声），过线才解锁 FRONT_TEMPO 尾随
 FRONT_TEMPO_DWELL_MIN = 30
+FRONT_TEMPO_CORRIDOR_FOLLOW = True
+FRONT_TEMPO_CORRIDOR_BASE_CAP = 150
+FRONT_TEMPO_CORRIDOR_ROUTES = {P.ROAD, P.MOUNTAIN}
+FRONT_TEMPO_CORRIDOR_NODES = {
+    "S04": P.WATER, "S05": P.WATER,
+    "S06": P.MOUNTAIN, "S08": P.MOUNTAIN,
+    "S07": P.ROAD, "S09": P.ROAD,
+}
+FRONT_TEMPO_HEAVY_MOUNTAIN_GUARD = True
+FRONT_TEMPO_HEAVY_MOUNTAIN_BASE_CAP = 120
+FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_BASE = 30
+FRONT_TEMPO_HEAVY_MOUNTAIN_MAX_OPP_LEAD = 20
+FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_LEG = 45
+FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_DETOUR = 28
 LATE_RESOURCE_PROGRESS = 0.62
 LATE_RESOURCE_MULT = 1.25
 ICE_AMMO_TARGET_BAD = 1
@@ -360,6 +376,9 @@ class TaskPlanner:
         self.FRONT_TEMPO_KEEP_LEAD_TRAIL = FRONT_TEMPO_KEEP_LEAD_TRAIL
         self.FRONT_TEMPO_KEYPASS_BASE_CAP = FRONT_TEMPO_KEYPASS_BASE_CAP
         self.FRONT_TEMPO_DWELL_MIN = FRONT_TEMPO_DWELL_MIN
+        self.FRONT_TEMPO_CORRIDOR_FOLLOW = FRONT_TEMPO_CORRIDOR_FOLLOW
+        self.FRONT_TEMPO_CORRIDOR_BASE_CAP = FRONT_TEMPO_CORRIDOR_BASE_CAP
+        self.FRONT_TEMPO_HEAVY_MOUNTAIN_GUARD = FRONT_TEMPO_HEAVY_MOUNTAIN_GUARD
         self.LATE_RESOURCE_PROGRESS = LATE_RESOURCE_PROGRESS
         self.LATE_RESOURCE_MULT = LATE_RESOURCE_MULT
         self.ICE_AMMO_TARGET_BAD = ICE_AMMO_TARGET_BAD
@@ -1204,6 +1223,119 @@ class TaskPlanner:
                 return edge.get("routeType")
         return None
 
+    def _opp_committed_corridor(self, state):
+        """对手前段已用移动/站位暴露的走廊；未知时不猜。"""
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        def node_corridor(node_id):
+            if node_id not in FRONT_TEMPO_CORRIDOR_NODES:
+                return None
+            if not self._key_pass_ahead(state, node_id):
+                return None
+            rt = FRONT_TEMPO_CORRIDOR_NODES[node_id]
+            return rt if rt in FRONT_TEMPO_CORRIDOR_ROUTES else None
+        edge_id = opp.get("routeEdgeId")
+        if edge_id and edge_id in state.graph.edges:
+            rt = state.graph.edges[edge_id].get("routeType")
+            if rt in FRONT_TEMPO_CORRIDOR_ROUTES:
+                return rt
+            return node_corridor(opp.get("nextNodeId")) \
+                or node_corridor(opp.get("currentNodeId"))
+        return node_corridor(opp.get("currentNodeId"))
+
+    def _candidate_corridor(self, state, task, cur, pos, speed, penalty,
+                            ecost):
+        bucket = self._task_route_bucket(state, task, pos)
+        if bucket in FRONT_TEMPO_CORRIDOR_ROUTES:
+            return bucket
+        _, path = state.graph.shortest_path(cur, pos, speed, penalty, ecost)
+        path = path or ()
+        for a, b in zip(path, path[1:]):
+            edge = state.graph.edge_between(a, b)
+            rt = edge.get("routeType") if edge else None
+            if rt in FRONT_TEMPO_CORRIDOR_ROUTES:
+                return rt
+        return None
+
+    def _front_tempo_corridor_follow_blocked(self, state, task, cur, pos,
+                                             speed, penalty, ecost, base):
+        """首关前跟随对手已提交走廊，别在岔路口把路权农掉。"""
+        if not self.FRONT_TEMPO_CORRIDOR_FOLLOW:
+            return False
+        if pos == cur:
+            return False
+        if state.phase != P.PHASE_NORMAL or self.opp_profile == "camper":
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) >= self.FRONT_TEMPO_CORRIDOR_BASE_CAP:
+            return False
+        if not self._key_pass_ahead(state, cur, penalty, ecost):
+            return False
+        if not self._front_tempo_contested_raw(state, cur):
+            return False     # raw 身位判定：轻门不吃全量门的形态门（V3.94）
+        opp_route = self._opp_committed_corridor(state)
+        if opp_route is None:
+            return False
+        cand_route = self._candidate_corridor(state, task, cur, pos, speed,
+                                              penalty, ecost)
+        if cand_route is None:
+            return False
+        return cand_route != opp_route
+
+    def _front_tempo_heavy_mountain_target_blocked(self, state, cur, target,
+                                                   speed, penalty, ecost,
+                                                   base):
+        """新图早段重山线入口闸门：别被 S06 任务/资源把主路权拽走。"""
+        if not self.FRONT_TEMPO_HEAVY_MOUNTAIN_GUARD:
+            return False
+        if not target or target == cur:
+            return False
+        if state.phase != P.PHASE_NORMAL:
+            return False
+        if self.opp_profile == "camper":
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) < FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_BASE:
+            return False
+        if (base or 0) >= FRONT_TEMPO_HEAVY_MOUNTAIN_BASE_CAP:
+            return False
+        # 这轮平台负样本集中在 S03 入口被 S06 T04/冰鉴吸走；对手已明显
+        # 抢到前方时，山线可能是反 camper 的救援路线，不在这里泛拦。
+        if cur not in ("S02", "S03") or target != "S06":
+            return False
+        if self._opp_gate_lead(state, cur) > FRONT_TEMPO_HEAVY_MOUNTAIN_MAX_OPP_LEAD:
+            return False
+        if FRONT_TEMPO_CORRIDOR_NODES.get(cur) == P.MOUNTAIN:
+            return False
+        if FRONT_TEMPO_CORRIDOR_NODES.get(target) != P.MOUNTAIN:
+            return False
+        if self._opp_committed_corridor(state) == P.MOUNTAIN:
+            return False
+        if not self._key_pass_ahead(state, cur, penalty, ecost):
+            return False
+
+        direct, direct_path = state.graph.shortest_path(
+            cur, state.gate_node, speed, penalty, ecost)
+        to_target, target_path = state.graph.shortest_path(
+            cur, target, speed, penalty, ecost)
+        from_target, onward_path = state.graph.shortest_path(
+            target, state.gate_node, speed, penalty, ecost)
+        if not direct_path or not target_path or not onward_path:
+            return False
+        detour = to_target + from_target - direct
+        return (to_target >= FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_LEG
+                or detour >= FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_DETOUR)
+
+    def _front_tempo_heavy_mountain_task_blocked(self, state, task, cur, pos,
+                                                 speed, penalty, ecost, base):
+        """T04 可在相邻节点处理，但会解锁重山线；按目标节点而非停靠点定价。"""
+        target = task.get("nodeId") or pos
+        if self._task_route_bucket(state, task, pos) != P.MOUNTAIN:
+            return False
+        return self._front_tempo_heavy_mountain_target_blocked(
+            state, cur, target, speed, penalty, ecost, base)
+
     def _keypass_tempo_task_blocked(self, state, task, cur, pos, speed,
                                     penalty, ecost, base):
         """首个关键关前的节奏闸门：120 分够进 S10，非官道先让。"""
@@ -1221,6 +1353,12 @@ class TaskPlanner:
     def _front_tempo_task_blocked(self, state, task, cur, pos, speed,
                                   penalty, ecost, base):
         """早段路线承诺闸门：低进度/山线任务先让，等 S07/S10 波次补分。"""
+        if self._front_tempo_heavy_mountain_task_blocked(
+                state, task, cur, pos, speed, penalty, ecost, base):
+            return True
+        if self._front_tempo_corridor_follow_blocked(
+                state, task, cur, pos, speed, penalty, ecost, base):
+            return True
         if not self._front_tempo_active(state, cur, base):
             return self._front_tempo_mountain_recovery_blocked(
                 state, task, cur, pos, speed, penalty, ecost, base)
@@ -1266,6 +1404,11 @@ class TaskPlanner:
 
     def _front_tempo_resource_blocked(self, state, cur, node_id, path):
         """早段不专程钻支线拿资源；贴着对手主路的硬件资源仍可争。"""
+        base = state.me.get("taskScore", 0) or 0
+        if base >= 30 and self._front_tempo_heavy_mountain_target_blocked(
+                state, cur, node_id, P.BASE_SPEED, self._penalty_fn(state),
+                self._edge_cost_fn(state), base):
+            return True
         if not self._front_tempo_active(state, cur):
             return False
         if node_id == cur:
