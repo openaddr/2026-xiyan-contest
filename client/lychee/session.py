@@ -98,14 +98,40 @@ class StrategySession(ClientSession):
                 # 缺 1 帧动作无伤大雅，连续缺 60 帧就是强制退赛
                 m = _ROUND_RE.search(e.body)
                 if m:
-                    write_frame(self._sock, heartbeat_action(
-                        self._match_id, int(m.group(1)), self._config.player_id))
+                    self._safe_heartbeat(int(m.group(1)))
                 self.log.error("undecodable frame skipped (round=%s): %.200s",
                                m.group(1) if m else "?", e.body)
                 continue
-            result = self._handle_message(message)
+            except (ConnectionError, OSError, ValueError) as e:
+                # 传输层死亡（RST/前缀失步）：成帧无法恢复，干净落地
+                # 而不是裸 traceback 崩溃（V3.28 加固审计第 2 条）
+                self.log.error("transport failure, session ends: %r", e)
+                return 1
+            # 保命网（V3.28 加固审计第 1 条）：帧是合法 JSON 但结构出乎
+            # 意料（字段缺失/为 null——平台有序列化缺陷前科 replay61），
+            # state 硬取字段抛 KeyError 曾能一路穿透杀进程 → 连续缺 60 帧
+            # 强制退赛 0 分。处理失败 = 跳帧 + 心跳，读循环在任何情况下
+            # 不许死；state 按帧全量重建，脏帧不会污染下一帧
+            try:
+                result = self._handle_message(message)
+            except Exception:
+                rnd = (message.get("msg_data") or {}).get("round") \
+                    or self.state.round or 1
+                self.log.exception(
+                    "handler failed (msg=%s round=%s), frame skipped",
+                    message.get("msg_name"), rnd)
+                self._safe_heartbeat(rnd)
+                continue
             if result is not None:
                 return result
+
+    def _safe_heartbeat(self, round_no):
+        """兜底心跳：socket 已死时不再二次崩溃（读循环自会发现 EOF）。"""
+        try:
+            write_frame(self._sock, heartbeat_action(
+                self._match_id, round_no, self._config.player_id))
+        except (ConnectionError, OSError) as e:
+            self.log.error("heartbeat write failed: %r", e)
 
     # ---------- 覆盖消息分发：接管 over / error ----------
 
@@ -125,7 +151,11 @@ class StrategySession(ClientSession):
     def _handle_start(self, data):
         self.state.on_start(data)
         self._match_id = self.state.match_id  # 官方基类字段，保持同步
-        self.strategy.on_start(self.state)
+        try:
+            self.strategy.on_start(self.state)
+        except Exception:
+            # ready 必须发出去：strategy 初始化钩子失败不构成弃赛理由
+            self.log.exception("strategy.on_start failed; continuing")
         write_frame(self._sock, ready_message(
             self.state.match_id, data.get("round", 1), self._config.player_id))
         self.log.info("match %s started, team=%s opp=%s",
@@ -135,14 +165,19 @@ class StrategySession(ClientSession):
 
     def _handle_inquire(self, data):
         t0 = time.monotonic()
-        self.state.on_inquire(data)
+        # round 兜底先于一切取好：state 更新失败时心跳也要带可用帧号
+        round_no = data.get("round") or (self.state.round or 0) + 1
         try:
+            self.state.on_inquire(data)
+            round_no = self.state.round
             actions = self.strategy.decide(self.state) or []
         except Exception:
-            self.log.exception("decide failed at round %d", self.state.round)
-            actions = []  # 空动作心跳兜底，绝不能缺帧
+            # state/decide 任何一层失败都退化为空动作心跳（V3.28：
+            # 曾只护 decide，state.on_inquire 的 KeyError 直接穿透杀进程）
+            self.log.exception("state/decide failed at round %s", round_no)
+            actions = []
         write_frame(self._sock, action_message(
-            self.state.match_id, self.state.round, self._config.player_id, actions))
+            self._match_id, round_no, self._config.player_id, actions))
 
         cost_ms = (time.monotonic() - t0) * 1000
         me = self.state.me

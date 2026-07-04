@@ -2881,16 +2881,17 @@ def test_trap_ransom():
     ok &= check("租买: 山口边农边冲无卡证据短等后抢边",
                 moved and moved["targetNodeId"] == "S10", str(moved))
 
-    # 2b) 无弹药豁免（V3.20）：对手两张卡配额已满 → 占位无冻结威胁，直接过
-    #     （task_score=130 关掉 S09 的蹲刷分支，隔离被测逻辑，同用例 3）
+    # 2b) 配额语义修正（V3.28，规则 921）：曾把"对手两张卡配额已满"当
+    #     无弹药豁免直接过——但规则原文是第 3 张卡合法且顶掉最早的
+    #     （已扣成本不返还，无额外代价）。对手挂两张废卡就能骗过豁免
+    #     再掐踏边。正确行为：占位威胁仍在，继续等待
     gs = gs_camp("S09", "S10", task_score=130)
     for nid in ("S05", "S07"):   # 对手的两张激活卡在别处
         gs.nodes[nid]["guard"] = {"ownerTeamId": "BLUE", "defense": 3,
                                   "maxDefense": 7, "active": True}
     a = PlannerStrategy().main_action(gs)
-    ok &= check("租买: 对手卡配额用满则占位无威胁直接过",
-                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
-                str(a))
+    ok &= check("租买: 对手卡配额满仍是威胁（921 第三张顶掉旧卡）",
+                a and a["action"] == "WAIT", str(a))
 
     # 2c) 无弹药豁免之二：KEY_PASS 底价 1 好果掏不出 → 同样直接过
     gs = gs_camp("S09", "S10", task_score=130)
@@ -3211,8 +3212,274 @@ def test_farm_meta():
     return ok
 
 
+def test_road_tax():
+    """V3.27 官道税修正：①阴影×漏斗去重 ②刷新流期望。
+
+    reports 新败局（vs2986 -6 / vs2738 -5，任务分已平、纯走廊时差）：
+    r99 岔路把官道冤枉成山线的楔子是武关被"阴影咽喉罚 35 + 漏斗税"
+    双重计税；刷新流让热点波次（S07 型）在估值里可见。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+    from lychee.planner import TaskPlanner
+
+    def gs_road(round_no=100, opp_pos="S07", tasks=None):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"] = []
+        d["tasks"] = tasks or []
+        d["weather"] = {"active": [], "forecast": []}
+        for p_ in d["players"]:
+            if p_["playerId"] == 1001:
+                p_.update(state="IDLE", currentNodeId="S03", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None, buffs=[],
+                          resources={}, freshness=95.0, goodFruit=95,
+                          badFruit=0, taskScore=60)
+            else:
+                p_.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None,
+                          delivered=False, retired=False, taskScore=0)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # ---- ① 阴影×漏斗去重 ----
+    # 对手在 S07（官道，先于我们到 S10）→ S10 同时在阴影集和漏斗 ctx 里。
+    # 去重开：S10 罚 = 时间罚（阴影 35 不叠）；去重关：罚 +35
+    pl = TaskPlanner()
+    gs = gs_road()
+    pl._funnel_ctx(gs, "S03", pl._penalty_fn(gs), pl._edge_cost_fn(gs))
+    assert pl._last_choke == "S10", f"前提: 漏斗咽喉应为 S10, got {pl._last_choke}"
+    assert "S10" in pl._shadow_nodes(gs), "前提: S10 应在阴影集"
+    pen_on = pl._penalty_fn(gs)("S10")
+    pl2 = TaskPlanner()
+    pl2.SHADOW_FUNNEL_DEDUP = False
+    pl2._funnel_ctx(gs, "S03", pl2._penalty_fn(gs), pl2._edge_cost_fn(gs))
+    pen_off = pl2._penalty_fn(gs)("S10")
+    ok &= check("官道税: 漏斗咽喉不叠阴影罚（去重 35）",
+                pen_off - pen_on == pl.SHADOW_CHOKE_PENALTY,
+                f"on={pen_on} off={pen_off}")
+    # 非漏斗咽喉的阴影罚保持原样（如对手路线上的其他咽喉）
+    other = [n for n in pl._shadow_nodes(gs)
+             if n != "S10" and gs.node(n).get("nodeType") in
+             ("KEY_PASS", "PASS", "MOUNTAIN_PASS")]
+    if other:
+        ok &= check("官道税: 非漏斗咽喉阴影罚不变",
+                    pl._penalty_fn(gs)(other[0])
+                    == pl2._penalty_fn(gs)(other[0]), str(other[0]))
+
+    # ---- ② 刷新流期望 ----
+    def mk_task(tid, node, refresh):
+        return {"taskId": tid, "taskTemplateId": "T01", "nodeId": node,
+                "score": 30, "processRound": 4, "active": True,
+                "completed": False, "ownerId": 0, "expireRound": 600,
+                "protectTeam": 0, "refreshRound": refresh}
+    pl3 = TaskPlanner()
+    # 喂 4 帧观测：S07 三波、S06 一波
+    for rnd, tasks in ((30, [mk_task("T_a", "S07", 30)]),
+                       (60, [mk_task("T_a", "S07", 30), mk_task("T_b", "S06", 60)]),
+                       (100, [mk_task("T_c", "S07", 100)]),
+                       (120, [mk_task("T_d", "S07", 120)])):
+        pl3._observe_spawns(gs_road(round_no=rnd, tasks=tasks))
+    ok &= check("刷新流: 观测计数按节点累计",
+                pl3._spawn_count.get("S07") == 3
+                and pl3._spawn_count.get("S06") == 1,
+                str(pl3._spawn_count))
+    g_late = gs_road(round_no=150)
+    r_hot = pl3._refresh_rate(g_late, "S07")
+    r_cold = pl3._refresh_rate(g_late, "S09")
+    ok &= check("刷新流: 热点率高于冷点", r_hot > r_cold >= 0.0,
+                f"S07={r_hot:.4f} S09={r_cold:.4f}")
+    b = pl3._refresh_bonus(g_late, "S07", ["S09", "S10"], 60)
+    ok &= check("刷新流: 热点目标有正加成且不超上限",
+                0 < b <= pl3.REFRESH_VALUE_CAP, f"bonus={b:.1f}")
+    return ok
+
+
+def test_rule_fixes():
+    """V3.28 规则实锤修复：①RUSH 设卡解禁（6.5 只禁小分队）+ 宫前驿
+    入列（2839 二卡镜像）②session 保命网（合法 JSON 坏结构不许杀进程）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    # ---- ① RUSH 后卡：r455 我们领跑停靠 S13（宫前驿），对手 S11 在追
+    #      （ETA ~35 在 8~150 窗口内）→ 应回手一张卡收尾段税
+    gs = GameState(1001)
+    gs.on_start(start)
+    d = json.loads(json.dumps(inquire))
+    d["round"], d["phase"] = 455, "RUSH"
+    d["contests"], d["tasks"] = [], []
+    d["weather"] = {"active": [], "forecast": []}
+    for p_ in d["players"]:
+        if p_["playerId"] == 1001:
+            p_.update(state="IDLE", currentNodeId="S13", nextNodeId=None,
+                      routeEdgeId=None, currentProcess=None, buffs=[],
+                      resources={}, freshness=90.0, goodFruit=90, badFruit=0,
+                      taskScore=150, verified=False)
+        else:
+            p_.update(state="IDLE", currentNodeId="S11", nextNodeId=None,
+                      routeEdgeId=None, currentProcess=None, buffs=[],
+                      delivered=False, retired=False, taskScore=150)
+    for n in d["nodes"]:
+        n["hasObstacle"] = False
+        n["guard"] = None
+        n["resourceStock"] = {}
+        # 保留 S13 的宫前交接处理会挡在设卡之前，本用例只测设卡时机，
+        # 统一清掉处理需求
+        n.pop("processType", None)
+        n["processRound"] = 0
+    gs.on_inquire(d)
+    st = PlannerStrategy()
+    st._processed_here = True
+    a = st.main_action(gs)
+    ok &= check("规则: RUSH 领跑过宫前驿回手卡（2839 二卡镜像）",
+                a and a["action"] == "SET_GUARD"
+                and a.get("targetNodeId") == "S13", str(a))
+
+    # ---- ② session 保命网：合法 JSON 但缺关键字段的 inquire 不杀进程
+    from lychee.session import StrategySession
+    from lychee_basic_client.config import Config
+
+    class FakeSock:
+        def __init__(self):
+            self.sent = []
+        def sendall(self, b):
+            self.sent.append(b)
+
+    cfg = Config(host="x", port=1, player_id=1001, player_name="t",
+                 version="test")
+    sess = StrategySession.__new__(StrategySession)
+    sess._sock = FakeSock()
+    sess._config = cfg
+    sess._match_id = "M"
+    from lychee.log import get_logger
+    sess.log = get_logger(1001)
+    sess.state = GameState(1001)
+    sess.state.on_start(start)
+    sess.strategy = PlannerStrategy()
+    # players 缺 playerId、nodes 缺 nodeId——曾是穿透 run() 的 KeyError 型毒帧
+    poison = {"round": 7, "players": [{"noPlayerId": True}],
+              "nodes": [{"broken": 1}], "edges": []}
+    try:
+        sess._handle_inquire(poison)
+        survived = True
+    except Exception:
+        survived = False
+    ok &= check("保命网: 坏结构 inquire 不杀进程且已回包",
+                survived and len(sess._sock.sent) == 1, f"sent={len(sess._sock.sent)}")
+    # run() 级别：_handle_message 抛异常 → 跳帧 + 心跳（不退出）
+    sent0 = len(sess._sock.sent)
+    def boom(_msg):
+        raise KeyError("round")
+    sess._handle_message = boom
+    import types
+    # 手工模拟 run() 的保命网分支（不真起 socket 读循环）
+    try:
+        try:
+            sess._handle_message({"msg_name": "inquire", "msg_data": {"round": 9}})
+        except Exception:
+            sess._safe_heartbeat(9)
+        net_ok = True
+    except Exception:
+        net_ok = False
+    ok &= check("保命网: 处理层异常兜底心跳可发出",
+                net_ok and len(sess._sock.sent) == sent0 + 1,
+                f"sent={len(sess._sock.sent)}")
+    return ok
+
+
+def test_farmer_walkin():
+    """V3.29 farmer 咽喉有界等待（replay93：S09 对零设卡农夫死等 109 帧，
+    r598 交付差 2 帧收盘）。三重门（farmer 画像+未见卡+读任务条中）
+    全中 → 等待封顶 TRAP_FARMER_WAIT 后走边；任一门不中照旧无上限等。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_choke(round_no, opp_proc=None, opp_task=90):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p_ in d["players"]:
+            if p_["playerId"] == 1001:
+                p_.update(state="IDLE", currentNodeId="S09", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None, buffs=[],
+                          resources={}, freshness=90.0, goodFruit=90,
+                          badFruit=0, taskScore=150, verified=False)
+            else:
+                p_.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=opp_proc, buffs=[],
+                          delivered=False, retired=False, taskScore=opp_task,
+                          goodFruit=90)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    FARM_PROC = {"action": "CLAIM_TASK", "taskId": "T_X",
+                 "targetNodeId": "S10", "remainRound": 3}
+
+    def feed(opp_proc, profile, frames):
+        st = PlannerStrategy()
+        st.PROFILE_ENABLED = False          # 手动钉画像，隔离被测逻辑
+        st._opp_profile = profile
+        last = None
+        for i in range(frames):
+            g = gs_choke(260 + i, opp_proc=opp_proc)
+            st.planner.opp_profile = profile
+            last = st.main_action(g)
+        return st, last
+
+    st, a = feed(FARM_PROC, "farmer", 30)
+    ok &= check("农夫走边: 三重门全中等待封顶后走边（replay93 钉子）",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
+    st, a = feed(FARM_PROC, "farmer", 20)
+    ok &= check("农夫走边: 预算内仍等待（不秒过）",
+                a and a["action"] == "WAIT", str(a))
+    st, a = feed(None, "farmer", 30)
+    ok &= check("农夫走边: 它没在读任务条则照旧无上限等",
+                a and a["action"] == "WAIT", str(a))
+    st, a = feed(FARM_PROC, "camper", 30)
+    ok &= check("农夫走边: camper 画像不豁免（V3.15 教义不动）",
+                a and a["action"] == "WAIT", str(a))
+    st = PlannerStrategy()
+    st.PROFILE_ENABLED = False
+    st._opp_profile = "farmer"
+    st.planner._guard_seen = True
+    last = None
+    for i in range(30):
+        g = gs_choke(260 + i, opp_proc=FARM_PROC)
+        st.planner.opp_profile = "farmer"
+        last = st.main_action(g)
+    ok &= check("农夫走边: 见过卡的对手不豁免",
+                last and last["action"] == "WAIT", str(last))
+    return ok
+
+
 def test_front_tempo_tail_follow():
-    """V3.28：S03 被对手小幅抢先时尾随主路，不再读低进度/山线任务。"""
+    """V3.30：S03 被对手小幅抢先时尾随主路，不再读低进度/山线任务。"""
     ok = True
     with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
         start = json.load(f)["msg_data"]
@@ -3377,6 +3644,9 @@ def main():
     ok &= test_card_profile()
     ok &= test_opp_profile()
     ok &= test_farm_meta()
+    ok &= test_road_tax()
+    ok &= test_rule_fixes()
+    ok &= test_farmer_walkin()
     ok &= test_front_tempo_tail_follow()
     print()
     print("ALL PASS" if ok else "SOME FAILED")

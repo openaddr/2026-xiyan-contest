@@ -85,6 +85,12 @@ GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
 # 对手阴影惩罚（V3.1 走廊竞争）：对手会先于我们到达的节点，资源会被扫空、
 # 设卡会掐点出现（四局回放实锤：落后 60~80 帧走同一走廊 = 全程吃陷阱）。
 SHADOW_CHOKE_PENALTY = 35   # 咽喉类节点（对手大概率回手设卡）
+# 阴影×漏斗去重（V3.27）：V3.16 起漏斗模型已按到达时机给"咽喉被卡"
+# 精确定价（死等+税×先验），V3.1 时代的阴影咽喉罚是它的粗粒度前身——
+# 同一个恐惧在官道武关上收两遍钱（35 帧寻路罚 + 漏斗税），reports 局
+# r99 岔路把官道冤枉成山线的决定性楔子。去重后 camper 世界仍有
+# prior 1.0 的漏斗税全额保护；被漏斗定价覆盖的咽喉不再叠阴影罚
+SHADOW_FUNNEL_DEDUP = True
 SHADOW_NODE_PENALTY = 8     # 普通节点（资源被扫、任务被先手）
 SHADOW_MARGIN = 5           # 到达时间差超过该值才算被抢先
 # 阴影咽喉不含 GATE：宫门验核双方都要排队，实战对手从未卡宫门；
@@ -123,6 +129,20 @@ WEATHER_FRESH_REGION = {("HEAVY_RAIN", P.WATER): 1.3}
 # 回头迟滞（V3.8）：刚离开的节点作为目标首跳的附加帧数与窗口期
 BACKTRACK_PENALTY = 25
 BACKTRACK_WINDOW = 40
+
+# 刷新流期望（V3.27，reports 局遗留观察项）：估值只给当前可见任务定价，
+# 热点节点（S07 型，整局 5 波刷新）的未来任务流在走廊决策时一分不值，
+# 而对手的 150 分正来自蹲波次。模型：节点刷新率 =（本局已观测刷新数 +
+# 候选点静态先验份额）混合，乘"我们在该节点附近可吃到的窗口"（目标点
+# 本身给驻留信用，沿途点给路过信用），按边际任务分与竞争折扣折算。
+# 刻度诚实注记：本图两条走廊的原始刷新数几乎打平（山 8 vs 官 7），
+# 本机制的价值在"该不该为等波次多留一手"而非扳走廊——扳走廊靠
+# SHADOW_FUNNEL_DEDUP 去重
+REFRESH_DWELL_CREDIT = 25   # 目标节点的驻留窗口信用（帧）
+REFRESH_PASS_CREDIT = 10    # 沿途节点的路过窗口信用（帧）
+REFRESH_CLAIM_PROB = 0.35   # 到点竞争 + 刷新时机不确定的折扣
+REFRESH_VALUE_CAP = 30.0    # 单次估值的刷新流加成上限（一个任务）
+REFRESH_RATE_FLOOR_ROUND = 120   # 观测分母下限（开局样本太少时防爆）
 
 # 目标粘性（V3.18）：每帧 argmax 重规划在两个净值接近的目标间会震荡
 # （回头迟滞只防物理折返，不防目标层面的反复横跳）。换目标要求新净值
@@ -327,6 +347,12 @@ class TaskPlanner:
         self.forward_rush_opp = False    # strategy 在线识别结论
         self._fwd_total = None
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
+        self.SHADOW_FUNNEL_DEDUP = SHADOW_FUNNEL_DEDUP
+        self.REFRESH_CLAIM_PROB = REFRESH_CLAIM_PROB
+        self.REFRESH_VALUE_CAP = REFRESH_VALUE_CAP
+        self._task_seen = set()      # 已见 taskId（刷新观测）
+        self._spawn_count = {}       # nodeId -> 本局已观测刷新数
+        self._last_choke = None      # 最近一次漏斗 ctx 的咽喉（去重用，容一帧滞后）
         self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
         # 对手画像（V3.20，strategy 每帧写入）："camper" 时漏斗先验提前升 1.0
@@ -352,6 +378,7 @@ class TaskPlanner:
 
     def plan(self, state):
         me = state.me
+        self._observe_spawns(state)
         cur = self._anchor_node(state)
         if not cur:
             return Plan("hold", detail="no position")
@@ -484,6 +511,7 @@ class TaskPlanner:
                         state, choke, t_o, path, state.round)
                     ctx = (choke, t_o, prior, toll_direct)
         self._funnel_cache = (key, ctx)
+        self._last_choke = ctx[0] if ctx else None
         return ctx
 
     @staticmethod
@@ -570,6 +598,45 @@ class TaskPlanner:
             # 仍保留死等差：若对手能在长边中途掐成卡，边上冻结风险不在这里消除。
             d_tax *= self.BREAK_FUNNEL_TAX_MULT
         return (d_dead + d_tax) * prior
+
+    # ================= 刷新流期望（V3.27） =================
+
+    def _observe_spawns(self, state):
+        """记录本局任务刷新观测：新 taskId 首见即计入其节点。"""
+        for t in state.tasks:
+            tid = t.get("taskId")
+            if not tid or tid in self._task_seen:
+                continue
+            self._task_seen.add(tid)
+            n = t.get("nodeId")
+            if n:
+                self._spawn_count[n] = self._spawn_count.get(n, 0) + 1
+
+    def _refresh_rate(self, state, node_id):
+        """节点每帧刷新率：本局观测 + 候选点静态先验的平滑混合。"""
+        obs_total = len(self._task_seen)
+        if not obs_total:
+            return 0.0
+        # 静态份额：该节点在多少个任务模板的候选列表里
+        mult = sum(1 for nodes in (state.task_candidates or {}).values()
+                   if node_id in nodes)
+        mult_total = sum(len(nodes)
+                         for nodes in (state.task_candidates or {}).values())
+        share = mult / mult_total if mult_total else 0.0
+        w = (self._spawn_count.get(node_id, 0) + share) / (obs_total + 1.0)
+        total_rate = obs_total / max(state.round, REFRESH_RATE_FLOOR_ROUND)
+        return total_rate * w
+
+    def _refresh_bonus(self, state, pos, back_path, base):
+        """目标点及沿途热点的未来任务流折分（上限一个任务）。
+
+        目标点给驻留窗口信用（做完任务多等一手波次是 loiter 既有行为），
+        沿途点给路过信用。按当前 base 的边际任务分与竞争折扣折算。"""
+        mv30 = marginal_task_value(base, 30)
+        bonus = self._refresh_rate(state, pos) * REFRESH_DWELL_CREDIT             * mv30 * self.REFRESH_CLAIM_PROB
+        for n in set(back_path or ()) - {pos}:
+            bonus += self._refresh_rate(state, n) * REFRESH_PASS_CREDIT                 * mv30 * self.REFRESH_CLAIM_PROB
+        return min(bonus, self.REFRESH_VALUE_CAP)
 
     # ================= 破关悬赏估值（V3.12） =================
 
@@ -872,7 +939,8 @@ class TaskPlanner:
         # 的差额计入净值（replay57 山路死等+满税 vs replay60 水路零死等半税）
         funnel = self._funnel_delta(state, cur, pos, proc + bframes,
                                     penalty, ecost) * fv
-        net = value + bundle - cost - funnel
+        refresh = self._refresh_bonus(state, pos, back_path, base)
+        net = value + bundle + refresh - cost - funnel
         return (net, pos) if net > 0 else None
 
     def _position_for(self, state, task, cur, speed, penalty, ecost=None):
@@ -1261,9 +1329,14 @@ class TaskPlanner:
         shadow = self._shadow_nodes(state)
         time_penalty = self._time_penalty_fn(state)
 
+        # 阴影×漏斗去重（V3.27）：漏斗模型已按时机精确定价的那个咽喉，
+        # 不再叠粗粒度阴影罚（用上一次 ctx 的咽喉，容一帧滞后——
+        # _funnel_ctx 自身要调本函数，实时取会成环）
+        dedup = self._last_choke if self.SHADOW_FUNNEL_DEDUP else None
+
         def penalty(nid):
             p = time_penalty(nid)
-            if nid in shadow:
+            if nid in shadow and nid != dedup:
                 node = state.node(nid)
                 if node.get("nodeType") in CHOKE_TYPES:
                     shadow_pen = self.SHADOW_CHOKE_PENALTY

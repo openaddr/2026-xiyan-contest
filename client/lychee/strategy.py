@@ -185,7 +185,11 @@ class PlannerStrategy(BaselineStrategy):
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
 
     # ---- 主动设卡（V3）----
-    GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE"}  # 咽喉类节点
+    # 咽喉类节点 + 宫前驿（V3.28：2839 的二卡就落在 S13 PALACE_STATION，
+    # r450 掐 RUSH 起点收尾段 35~70 帧税——普通节点免底价，这张卡对
+    # 领跑者近乎免费；此前类型门把它整个排除在我们的武器库外）
+    GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE",
+                        "PALACE_STATION"}
     GUARD_MIN_OPP_ETA = 8       # 对手至少 8 帧后才到（4 帧读条 + 生效余量）
     GUARD_MAX_OPP_ETA = 150     # 太远则风化/悬赏先到，白设
     # V3.12：80 → 65。V3.7 修了 ETA 度量后 4 局仍 0 次设卡——replay31 领跑局
@@ -219,8 +223,19 @@ class PlannerStrategy(BaselineStrategy):
     TRAP_ORDINARY_WAIT = 45     # 普通节点驻扎等待预算（V3.22）：农夫型
                                 # 久驻不狙击，等满即硬闯；45 ≈ 它一次任务
                                 # 波次间隔的量级，也 < 被掐的冻结代价
-    TRAP_CONVERGE_ORDINARY = False  # 收敛分支仍只防咽喉；普通节点防守交给
-                                # 驻扎等待 + 我方同路先到反手卡，避免全图误等
+    # farmer 咽喉有界等待（V3.29，replay93 抓获）：定价层已按 farmer
+    # 先验 0.35 判官道便宜，保命层却不读画像无上限死等——replay93 在
+    # S09 对着"蹲武关农波次、整局零设卡"的 2738 站了 109 帧，r598 才
+    # 交付（离收盘 2 帧），差点把 716 分等成未交付。教义修正：无上限
+    # 等待自身在钟表面前就是灾难级风险。三重门（画像 farmer + 全场未
+    # 见卡 + 它此刻停靠在读任务条）全中时，等待封顶后走边——它每张
+    # 任务读条 4 帧内规则上无法起手设卡，走边窗口有真实掩护；它若真
+    # 变脸落卡，_guard_seen 立刻关死本豁免，一局至多上当一次。
+    # camper / 见过卡 / 非农读条对手照旧无上限等待（V3.15 教义不动）
+    TRAP_FARMER_WAIT = 25
+    TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
+                                # （无界版被电池证伪 camper 34/48；有界
+                                # 变体的配对对照见 trap-gate 实验脚本）
     TRAP_CAMPED_ORDINARY = True     # 驻扎分支防普通节点（V3.22 主开关，
                                 # 语料=2839 第 4 局 S09 掐踏边）
     TRAP_WAIT_MAX = 30          # 陷阱等待的日志告警阈值（V3.15 起不再硬闯：
@@ -754,6 +769,10 @@ class PlannerStrategy(BaselineStrategy):
 
     def _guard_opportunity(self, state, cur, plan):
         me, opp = state.me, state.opp
+        # V3.28 删 RUSH 自禁：任务书 6.5 冲刺后只禁"新提交小分队动作"，
+        # SET_GUARD 是主车队动作不在其列（2839 复盘根因 D 的"不对称
+        # 枷锁"——对面专挑 r450 落 S13 二卡，我们规则上完全可以对等
+        # 奉还却自缚手脚）。交付安全由既有 slack 闸门兜底
         if not opp or opp.get("delivered") or opp.get("retired"):
             return None
         node = state.node(cur)
@@ -797,6 +816,10 @@ class PlannerStrategy(BaselineStrategy):
         if choke_guard and node_type == "KEY_PASS" \
                 and opp_eta <= self.GUARD_HOT_OPP_ETA:
             slack_min = self.GUARD_SLACK_HOT
+        elif node_type in self.GUARD_REAR_TYPES:
+            slack_min = (self.GUARD_REAR_RUSH_SLACK
+                         if state.phase == P.PHASE_RUSH
+                         else self.GUARD_REAR_SLACK)
         elif rear_guard and not choke_guard:
             slack_min = (self.GUARD_REAR_RUSH_SLACK
                          if state.phase == P.PHASE_RUSH
@@ -1136,6 +1159,15 @@ class PlannerStrategy(BaselineStrategy):
         return (state.round + state.player_id) % 2 == 1
 
     @staticmethod
+    def _opp_farming_here(state, node_id):
+        """对手停靠在该节点且正在读任务条（farmer 有界等待的第三重门）。"""
+        opp = state.opp
+        if not opp or opp.get("routeEdgeId") \
+                or opp.get("currentNodeId") != node_id:
+            return False
+        return bool((opp.get("currentProcess") or {}).get("taskId"))
+
+    @staticmethod
     def _opp_at_node(state, node_id):
         """对手主车队正停靠在该节点上（能以 ≤3 好果原地补卡，削弱=喂饵）。"""
         opp = state.opp
@@ -1189,15 +1221,17 @@ class PlannerStrategy(BaselineStrategy):
     def _opp_can_guard(state, node_id):
         """对手此刻能否在 node_id 落一张有效卡（中边冻结威胁的存在性）。
 
-        规则口径：每队同时激活的卡至多 2 张；KEY_PASS/宫门设卡有 1 好果
-        底价（普通节点 d2 免费）。任一条不满足 → 占位无冻结威胁。
+        V3.28 修正（规则审计确认级发现）：曾把"对手已有 2 张有效卡"当
+        无弹药豁免——但任务书 921 行原文是"新设卡完成后超过 2 个，移除
+        本队最早完成的有效设卡，已扣成本不返还"，即第 3 张卡完全合法且
+        顶掉旧卡无额外代价。配额子句是反向漏洞：对手挂两张免费废卡就能
+        让全部中边陷阱防御静默失效，再掐我们的踏边。删除。
+        唯一的规则硬门是果品底价：KEY_PASS/宫门 1 好果（普通节点免费）。
         """
         opp = state.opp
         if not opp:
             return False
-        if sum(1 for nid in state.nodes if state.enemy_guard(nid)) >= 2:
-            return False
-        if state.node(node_id).get("nodeType") == "KEY_PASS" \
+        if state.node(node_id).get("nodeType") in ("KEY_PASS", "GATE") \
                 and (opp.get("goodFruit", 0) or 0) < 1:
             return False
         return True
@@ -1272,6 +1306,22 @@ class PlannerStrategy(BaselineStrategy):
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_FARM_RUSH_WAIT:
                 return give_up()
+        # farmer 咽喉有界等待（V3.29）：三重门全中才封顶——画像 farmer、
+        # 全场未见其设卡、它此刻停靠在 nxt 读任务条（读条中规则上无法
+        # 同帧起手 SET_GUARD）。等待超预算即走边，别把定价层已经买单的
+        # 便宜官道等成 r598 交付
+        if (camped and not ordinary
+                and self._opp_profile == "farmer"
+                and not self.planner._guard_seen
+                and self._opp_farming_here(state, nxt)):
+            _, n_wait = self._trap_wait
+            if self._trap_wait[0] == nxt and n_wait >= self.TRAP_FARMER_WAIT:
+                if self.log:
+                    self.log.info("farmer occupies choke %s, walk-in after %d",
+                                  nxt, n_wait)
+                # 不走 give_up()：保留计数使走边决定粘性（清零会在下一帧
+                # 决策点让等待从头再来）；对手离开后由上游正常复位
+                return False
         # 无弹药豁免（V3.20）：中边冻结的前提是对手真能落卡——设卡每队
         # 同时至多 2 张，KEY_PASS 还要 1 好果底价。配额用满/掏不出底价时
         # 占位只是身位，没有冻结威胁，直接过边。与短边豁免同级：规则数学
