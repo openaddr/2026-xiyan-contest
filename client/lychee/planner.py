@@ -20,6 +20,17 @@ FRESH_VALUE_PER_FRAME = 0.11   # 每帧鲜度损耗折分 ≈ 0.055(官道) × 1
 TIME_SCORE_PER_FRAME = 70.0 / 600.0   # 用时分斜率（任务系数拉满时）
 RAW_TIME_SCORE_EST = 25     # 估算用的原始用时分（约 385 帧交付）
 CONTEST_RISK_DISCOUNT = 0.5  # 对手比我们更近时的估值折扣
+# 争夺宽限带（V3.22 实验，已证伪，保留旋钮与记录）：反事实统计
+# （contest_truth，36 局 1900+ 样本）证明 0.5 作为概率大错——预测落后
+# ≤4 帧硬抢真实胜率 100%（三形态无一例外）、5~10 帧 96~99%（opp_eta
+# 是不含对手停留的裸 ETA + 对手多半无意图，双重偏差）。但 840 局扫描
+# 证明它作为政策歪打正着：G=4 五形态逐位零变化（小差距折半从不翻转
+# argmax）；G=10/20 全线崩坏（camper 42→38、toller 48→42、farmer
+# 24→22）——去抢对手身边的任务赢面虽大，却把走廊到达拖后 6~10 帧，
+# 悬崖帧价 25~35 分/帧远超任务边际值。0.5 的"悲观"实际在给估值体系
+# 没显式定价的"贴身绕路外部性"买单。真要动它，先给走廊外部性建模
+CONTEST_GRACE_FRAMES = 0     # 0 = 现行行为（任何落后都吃满折扣）
+CONTEST_GRACE_DISCOUNT = 0.9
 # 阻挡节点的寻路惩罚按真实处理代价估：会计入 ETA，不能虚高
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
@@ -204,6 +215,9 @@ class TaskPlanner:
         self.SWITCH_MARGIN = SWITCH_MARGIN
         self.FUNNEL_GUARD_PRIOR = FUNNEL_GUARD_PRIOR
         self.OFFPATH_RACE_FLOOR = OFFPATH_RACE_FLOOR
+        self.CONTEST_RISK_DISCOUNT = CONTEST_RISK_DISCOUNT
+        self.CONTEST_GRACE_FRAMES = CONTEST_GRACE_FRAMES
+        self.CONTEST_GRACE_DISCOUNT = CONTEST_GRACE_DISCOUNT
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
         self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
@@ -658,7 +672,10 @@ class TaskPlanner:
             return None
         opp_eta = self._opp_eta(state, pos)
         if opp_eta < f_to:
-            d = CONTEST_RISK_DISCOUNT
+            gap = f_to - opp_eta
+            d = (self.CONTEST_GRACE_DISCOUNT
+                 if gap <= self.CONTEST_GRACE_FRAMES
+                 else self.CONTEST_RISK_DISCOUNT)
             if pos not in self._opp_path_nodes(state):
                 d = max(d, self.OFFPATH_RACE_FLOOR)
             value *= d
