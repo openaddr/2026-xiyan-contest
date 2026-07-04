@@ -390,7 +390,7 @@ class PlannerStrategy(BaselineStrategy):
         else:
             self._opp_stationary = (None, state.round)
 
-        # 富点干等观测（V3.37）逐帧跑——不能挂在 _profile_tick 里，
+        # 富点干等观测（V3.91）逐帧跑——不能挂在 _profile_tick 里，
         # 画像定型后那条链就停了，而干等证据恰恰在定型之后才累积
         if opp:
             self._dwell_tick(state, opp)
@@ -523,7 +523,7 @@ class PlannerStrategy(BaselineStrategy):
         self.planner.forward_rush_opp = self._fwd_rush
 
     def _dwell_tick(self, state, opp):
-        """富点干等观测（V3.37）：普通节点上的累计无读条闲置帧。
+        """富点干等观测（V3.91）：普通节点上的累计无读条闲置帧。
 
         2986 型官道农会在任务富点纯等刷新波；2839/toller"农不停步"、
         camper 只蹲关隘（节点类型天然排除）。停留 ≥5 帧后的闲置才计，

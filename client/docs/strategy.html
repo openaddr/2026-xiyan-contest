@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.37-roadfarmer-corpus)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.91-exp-roadfarmer-corpus)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.37-roadfarmer-corpus</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.91-exp-roadfarmer-corpus</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -608,13 +608,13 @@ slack 把反卡机会跳过——新增追分合流卡：明显任务分落后 +
 <td>selftest 钉子 + smoke 全绿</td></tr>
 <tr><td><b>3.34 farmer-converge-walkin</b></td><td><b>replay95 复盘：高分 farmer 正在向 S10/S11 收敛时，原 farmer
 有界等待只覆盖 camped 读条，S09+S10 白等 36 帧同分输用时——新增零设卡高分 farmer 收敛短等封顶</b></td>
-<td>并行线（撞号 3.34，roadfarmer 轮改号 3.37）</td></tr>
+<td>并行线（撞号 3.34，roadfarmer 探索轮改入 3.9x 号段）</td></tr>
 <tr><td><b>3.35 stability-guard-tempo</b></td><td><b>稳健回滚与平台输局修复：撤回 S02 弃权反同步；收紧边农边冲无卡
 证据抢长边；全量 FRONT_TEMPO 仍关，仅恢复"对手已有任务分/冲锋证据"下的山路线保速轻门
 （FRONT_TEMPO_MOUNTAIN_RECOVERY）</b></td><td>平台 lose 批次驱动</td></tr>
 <tr><td><b>3.36 edge-bounty-rescue</b></td><td><b>20579/20587/20576 复盘：边上被关键口卡冻结、第一刀后防守 4/5 且
 只剩 3 人时允许应急补第二刀；领先 farmer 局不再把可一击破的主动卡送成悬赏分</b></td><td>竞速热卡/边冻结卡/RUSH 二卡不受影响</td></tr>
-<tr><td><b>3.37 roadfarmer-corpus</b></td><td><b>RoadFarmerBot 语料 + FRONT_TEMPO 门控复活：补齐 2986/2619/2738 官道农
+<tr><td><b>3.91 roadfarmer-corpus（探索线）</b></td><td><b>RoadFarmerBot 语料 + FRONT_TEMPO 门控复活：补齐 2986/2619/2738 官道农
 陪练（官道 waypoint + 富点干等刷新波 + 零设卡 + 骑马，12 种子复现 -30/-59 真败局）；真语料复证 FRONT_TEMPO 对该
 形态收益决定性（总 margin 5130→6305，全开可达 7505 但伤 camper/toller/mirror）。门控四轮收紧终版 = farmer 模式 +
 零设卡 + 普通节点累计干等 ≥30 帧（FRONT_TEMPO_DWELL_MIN——"农不停步"的 2839 与蹲关隘的 camper 永不过线）；
@@ -623,7 +623,7 @@ slack 把反卡机会跳过——新增追分合流卡：明显任务分落后 +
 5/8 收益哨兵）全绿；camper×8/toller×4/rusher/mirror 逐位不变；镜像配对 12 种子净 -84（单种子集中，期望内）</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.37-roadfarmer-corpus@3.37（含 3.34-3.36 并行线合流） ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 exp/v3.91-roadfarmer-corpus（探索线，含主线 3.34-3.36 合流） ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 
