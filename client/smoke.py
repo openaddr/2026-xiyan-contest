@@ -5,7 +5,7 @@
 快速把关。种子按历史信息量挑选：
 - camper 0/4/5/10/15/19/23：相位敏感七种子（悬崖带/宽限带/前推偏置
   三轮实验的全部翻盘与回归都发生在这里）
-- toller 0/1/5：冻结/回手卡代表局
+- toller 0/1/3/5：冻结/回手卡代表局
 - mirror 0/2/7、farmer 1/5、rusher 3：形态哨兵
 基线（V3.25）：见文件尾 EXPECT——偏离即黄灯，去跑全量电池定位。
 """
@@ -20,7 +20,7 @@ from sparring import (CamperBot, FarmerBot, RusherBot,   # noqa: E402
 
 SENTINELS = (
     [("camper", s) for s in (0, 4, 5, 10, 15, 19, 23)]
-    + [("toller", s) for s in (0, 1, 5)]
+    + [("toller", s) for s in (0, 1, 3, 5)]
     + [("mirror", s) for s in (0, 2, 7)]
     + [("farmer", s) for s in (1, 5)]
     + [("rusher", 3)]

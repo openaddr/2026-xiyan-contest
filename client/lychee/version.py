@@ -60,4 +60,8 @@
 #        先让；对手强通离开原节点时解除中边陷阱等待；冰鉴延后到已有坏果
 #        弹药后使用，零坏果时降低前段冰鉴绕路吸引力；同时保留 3.18 线
 #        farmer 咽喉有界等待/规则实锤修复。
-BUILD_VERSION = "3.30-tempo-ammo-farmer"
+# 3.31 = 对手节奏状态收敛 + 悬崖漏斗会计修正：planner 侧统一区分
+#        farmer/farm-rusher/rusher/camper，farm-rusher 走独立前推/局部
+#        设卡/短等响应，不吃完整悬崖价；悬崖带内漏斗税恒按基础帧价
+#        计，避免同一份漏斗代价被 30 分/帧重复放大；smoke 补 toller3。
+BUILD_VERSION = "3.31-posture-funnel-smoke"

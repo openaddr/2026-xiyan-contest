@@ -187,10 +187,10 @@ RACE_CLIFF_OPP_FARM = 30    # 对手在途 taskScore ≥ 此值 → 它一路在
                             # 局 48/48→42/48、镜像均分 -53——弃经济抢一场
                             # 不存在的竞速。语料里的脚本抢关者到关前分数恒 0）
 RACE_CLIFF_FRAME_VALUE = 30.0
-# 边农边冲压力（V3.24）：平台 2986/2738 不是纯 rusher，而是官道高速
-# 农到 120/150 后继续贴宫门推进。不能把它们重新拉进全局悬崖价
-# （mirror/toller 回归会爆），只把该信号用于局部压山路、短等观察、
-# 以及普通汇入点先手卡。
+# 边农边冲压力（V3.24/V3.31）：平台 2986/2738 不是纯 rusher，也不是
+# 纯 farmer，而是官道高速农到 120/150 后继续贴宫门推进。该信号现在
+# 收敛到 _opp_tempo_mode()，避免同一份在途任务分证据一边关闭悬崖、
+# 一边打开前推偏置。
 FARM_RUSH_TASK = 90
 FARM_RUSH_GATE_ETA = 300
 FARM_RUSH_GATE_MARGIN = 10
@@ -935,10 +935,11 @@ class TaskPlanner:
             fv = (FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME) \
                 * self.RACE_FRAME_MULT
         cost = (total_frames + bframes) * fv
-        # 漏斗定价（V3.16）：绕路改变到达关键关隘的时机，死等/满防税/躲税
-        # 的差额计入净值（replay57 山路死等+满税 vs replay60 水路零死等半税）
+        # 漏斗定价（V3.16/V3.31）：绕路改变到达关键关隘的时机，死等/
+        # 满防税/躲税的差额计入净值。漏斗税是实际等待/通行帧，恒用基础
+        # 帧价；悬崖帧价已包含输掉漏斗竞速的尾部后果，不能再乘一次 30。
         funnel = self._funnel_delta(state, cur, pos, proc + bframes,
-                                    penalty, ecost) * fv
+                                    penalty, ecost) * _FV
         refresh = self._refresh_bonus(state, pos, back_path, base)
         net = value + bundle + refresh - cost - funnel
         return (net, pos) if net > 0 else None
@@ -1014,13 +1015,13 @@ class TaskPlanner:
         """
         if self._cliff_cache[0] == state.round:
             return self._cliff_cache[1]
-        # （V3.22/V3.24 证伪注：高任务推进者不进悬崖。曾试"推进判据"、
-        # 又试 V3.24 的 farm_rusher_pressure 复活悬崖，都会误杀
-        # mirror/toller。边农边冲只做局部压山路/短等，不改全局帧价。）
+        # V3.31：不再用 taskScore>=30 这个裸证据直接当 farmer。先归一到
+        # 互斥节奏状态：纯 farmer 和 farm-rusher 都不吃完整悬崖价；后者
+        # 走自己的前推/局部设卡/短等响应。曾试把 farm-rusher 重新拉进
+        # 全局悬崖，toller seed3 立刻从 +18 回归到 -169。
         active = False
-        opp = state.opp or {}
-        farming = (opp.get("taskScore") or 0) >= self.RACE_CLIFF_OPP_FARM
-        if self.RACE_CLIFF_ENABLED and not farming:
+        if self.RACE_CLIFF_ENABLED \
+                and self._opp_tempo_mode(state) not in ("farmer", "farm-rusher"):
             cur = self._anchor_node(state)
             ctx = self._funnel_ctx(state, cur, self._penalty_fn(state),
                                    self._edge_cost_fn(state)) if cur else None
@@ -1201,10 +1202,29 @@ class TaskPlanner:
             return value * self.LATE_RESOURCE_MULT
         return value
 
+    def _opp_tempo_mode(self, state):
+        """互斥对手节奏状态：camper/farmer/rusher/farm-rusher/unknown。
+
+        这里不替代 strategy 的粘性画像，只给 planner 内部所有节奏机制
+        一个共同入口，避免同一份 taskScore 证据被不同模块解释成相反结论。
+        """
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return "unknown"
+        if self.opp_profile == "camper":
+            return "camper"
+        if self.forward_rush_opp:
+            return "farm-rusher" if (opp.get("taskScore") or 0) else "rusher"
+        if self.farm_rusher_pressure(state):
+            return "farm-rusher"
+        if (opp.get("taskScore") or 0) >= self.RACE_CLIFF_OPP_FARM:
+            return "farmer"
+        return "unknown"
+
     def _forward_factor(self, state, node_id):
         """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
         floor = self.FORWARD_BIAS_FLOOR
-        if self.forward_rush_opp:
+        if self._opp_tempo_mode(state) in ("rusher", "farm-rusher"):
             floor = min(floor, self.FORWARD_BIAS_AUTO)
         if floor >= 1.0:
             return 1.0

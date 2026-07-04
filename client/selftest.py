@@ -2436,6 +2436,26 @@ def test_race_cliff():
     ok &= check("悬崖: 显式非竞速口径仍可豁免",
                 abs(pl._frame_value(gs, 100, race_adjust=False)
                     - base_fv) < 1e-9, "")
+    # 1b) 漏斗税恒用基础帧价：悬崖帧价已经代表输掉漏斗竞速的胜负尾部，
+    #     _funnel_delta 的实际等待/税帧不能再乘 30 形成双计。
+    def eval_with_funnel(delta):
+        plx = TaskPlanner()
+        pen = plx._penalty_fn(gs)
+        ec = plx._edge_cost_fn(gs)
+        to_gate, _ = gs.graph.shortest_path("S07", gs.gate_node,
+                                            P.BASE_SPEED, pen, ec)
+        plx._funnel_delta = lambda *_args, **_kwargs: delta
+        task = {"taskId": "T_CLIFF_FUNNEL", "taskTemplateId": "T01",
+                "nodeId": "S07", "processRound": 4, "score": 90,
+                "expireRound": 999, "active": True, "completed": False,
+                "failed": False, "ownerPlayerId": 0}
+        return plx._evaluate(gs, task, "S07", 0, to_gate, to_gate,
+                             999, P.BASE_SPEED, pen, ec)[0]
+    net0 = eval_with_funnel(0)
+    net10 = eval_with_funnel(10)
+    ok &= check("悬崖: 漏斗税不乘悬崖帧价",
+                abs((net0 - net10) - 10 * base_fv) < 1e-6,
+                f"diff={net0 - net10:.3f} base={10 * base_fv:.3f}")
 
     # 2) 安全领先豁免：我 S09（56）、对手 S05（115）→ 领先 59 > 10，不悬崖
     ok &= check("悬崖: 安全领先不悬崖",
@@ -2463,15 +2483,21 @@ def test_race_cliff():
     pl6 = TaskPlanner()
     pl6.RACE_CLIFF_ENABLED = False
     ok &= check("悬崖: 开关关闭回落", not pl6.race_cliff(gs_cliff()), "")
-    # 6b) 对手在途农任务（taskScore ≥ 30）→ 它不是在抢关，不悬崖
+    # 6b) 对手在途农任务（taskScore ≥ 30）且未形成宫门压力 → 纯 farmer，
+    #     不按抢关悬崖处理。
     #     （A/B 实锤：无此门 farmer 局 48/48→42/48、镜像均分 -53）
     ok &= check("悬崖: 对手在途农任务不悬崖",
                 not TaskPlanner().race_cliff(gs_cliff(opp_task=60)), "")
-    # 6c) 复盘校准：边农边冲者能被识别，但仍不重新打开全局悬崖价。
+    # 6c) V3.31：边农边冲者不再被裸 taskScore 泛化成 farmer；它属于
+    #     farm-rusher，走自己的前推/局部设卡/短等响应，不吃完整悬崖价
+    #     （全局悬崖化被 toller seed3 证伪）。
     gs = gs_cliff(opp_task=90, opp_moving=("S07", "S09", "E_X", 20))
     pl = TaskPlanner()
-    ok &= check("悬崖: 边农边冲识别但不进全局悬崖",
-                pl.farm_rusher_pressure(gs) and not pl.race_cliff(gs), "")
+    ok &= check("悬崖: 边农边冲进入 farm-rusher 档",
+                pl._opp_tempo_mode(gs) == "farm-rusher"
+                and pl.farm_rusher_pressure(gs), pl._opp_tempo_mode(gs))
+    ok &= check("悬崖: farm-rusher 不吃完整悬崖价",
+                not pl.race_cliff(gs), "")
     # 6d) 但高任务分去追任务/绕离宫门的 farmer 仍被农任务门保护。
     ok &= check("悬崖: 高分但未向宫门推进仍豁免",
                 not TaskPlanner().race_cliff(gs_cliff(
