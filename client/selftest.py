@@ -3041,6 +3041,34 @@ def test_card_profile():
     ok &= check("画像: 对手嗜好献贡则改打强行克制",
                 pick_biased == P.CARD_QIANG_XING, str(pick_biased))
 
+    def gs_s02_deadlock():
+        gs = gs_contest()
+        for p in gs.players.values():
+            p.update(currentNodeId="S02", nextNodeId=None, routeEdgeId=None,
+                     currentProcess=None, buffs=[], resources={},
+                     freshness=96.0, goodFruit=90, guardActionPoint=4)
+        gs.round = 72
+        gs.events = []
+        return gs
+
+    st = PlannerStrategy()
+    st.CARD_MIX_RATE = 0
+    s02 = gs_s02_deadlock()
+    deadlock_contest = {"contestId": "C_S02", "contestType": P.CONTEST_DOCK,
+                        "targetNodeId": "S02",
+                        "redPlayerId": 1001, "bluePlayerId": 2002}
+    ok &= check("画像: S02 无压力仍按献贡最优",
+                st.pick_card(s02, deadlock_contest) == P.CARD_XIAN_GONG, "")
+    s02.events = [
+        {"type": "WINDOW_CONTEST_DRAW",
+         "payload": {"contestType": P.CONTEST_DOCK, "targetNodeId": "S02"}},
+        {"type": "WINDOW_CONTEST_REPEAT_SUPPRESSED",
+         "payload": {"contestType": P.CONTEST_DOCK, "targetNodeId": "S02"}},
+    ]
+    st._absorb_feedback(s02)
+    ok &= check("画像: S02 连续平局后红方改打兵争破镜像",
+                st.pick_card(s02, deadlock_contest) == P.CARD_BING_ZHENG, "")
+
     # 3) 种子 RNG：同 matchId+playerId 的两个实例出牌序列完全一致
     #    （回放回归可复现；对手不知道种子派生方式，博弈价值不受影响）
     s1, s2 = PlannerStrategy(), PlannerStrategy()
@@ -3820,6 +3848,16 @@ def test_front_tempo_tail_follow():
     plan = st3.planner.plan(gs)
     ok &= check("前段保速: 默认不做 S06 山路清障",
                 plan.kind != "task", repr(plan))
+
+    gs = gs_replay93("S03", 30, (t_s06,), "S02", "S03", "E02",
+                     opp_task_score=0)
+    st_heavy = PlannerStrategy()
+    plan = st_heavy.planner.plan(gs)
+    a = st_heavy.main_action(gs, plan)
+    ok &= check("前段重山线: 无对手画像也不被相邻 T04 拽进 S06",
+                plan.kind != "task" and a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S07",
+                f"{plan} -> {a}")
 
     t_s07 = {"taskId": "T_S07_OVER", "taskTemplateId": "T01",
              "nodeId": "S07", "processRound": 4, "score": 30,
