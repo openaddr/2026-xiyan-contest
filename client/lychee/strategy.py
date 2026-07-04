@@ -191,6 +191,9 @@ class PlannerStrategy(BaselineStrategy):
     EDGE_WEAKEN_RESCUE_AVAIL = 2    # 已卡死在关键口边上时，允许动用最后一组
     EDGE_WEAKEN_RESCUE_DEFENSE = 5  # 第一刀/风化后再救，不碰满防新卡
     EDGE_WEAKEN_RESCUE_ROUND = 220  # 中盘以后被卡死时，最后一组人手也要救命
+    EDGE_REROUTE_MIN_BLOCKED = 2    # 连续确认被卡后，才尝试主办方确认的边上换目标
+    EDGE_REROUTE_MIN_DEFENSE = 4    # 防 1/2 小卡优先削弱，不绕大圈
+    EDGE_REROUTE_MIN_SLACK = -80    # 绕三角是重税；只拦深度已死的交付预算
 
     # ---- 主动设卡（V3）----
     # 咽喉类节点 + 宫前驿（V3.28：2839 的二卡就落在 S13 PALACE_STATION，
@@ -250,8 +253,9 @@ class PlannerStrategy(BaselineStrategy):
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
     # 冻结（实测连环两次：S10 花 6 人手解冻，S11 无人手可用冻到终场未交付）。
     # 它离开该节点后就永远无法在那里设卡 —— 等它走，留卡就站在节点上攻坚拆。
-    # 任务书 8.2：移动中只能 WAIT/续走/用马，不能回头——中边冻结在规则上
-    # 无解，预防是唯一手段。V3.9 曾加"设卡前科"证据门防误伤，但对手的第一
+    # 主办方澄清（V3.55）：移动中不能原路返回，但可改去起点的其它相邻
+    # 节点；中边冻结不是无解，而是昂贵的三角改道/强通税。预防仍优先。
+    # V3.9 曾加"设卡前科"证据门防误伤，但对手的第一
     # 张卡必然没有前科（replay36: r295 几何+地形全中被前科门放行，冻 195 帧
     # 零交付）；地形门已把误伤压到每局 ≤1 次咽喉等待（≤30 帧 ≈ 6.6 分），
     # 对比冻结 180+ 帧 / 零交付 500 分级，陷阱概率 ≥5% 即回本 → 删证据门。
@@ -344,6 +348,7 @@ class PlannerStrategy(BaselineStrategy):
         self._own_guard_broken = {}      # nodeId -> 最近一次我方卡失效帧
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
         self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
+        self._edge_blocked = (None, 0)    # (边上被敌卡拒绝的目标, 连续帧数)
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
         self._window_draw_pressure = {}  # (target, type) -> (累计平局压力, 最近帧)
         self._window_suppress_until = {} # (target, type) -> 服务器重复平局抑制到期帧
@@ -412,6 +417,17 @@ class PlannerStrategy(BaselineStrategy):
             self.planner.back_node = prev_station
             self.planner.back_until = state.round + 40
         self._weaken_target = None
+        if state.me.get("routeEdgeId"):
+            nxt = state.me.get("nextNodeId")
+            blocked = any(code == P.E_MOVE_BLOCKED_BY_GUARD
+                          for _, code in state.my_rejections())
+            if blocked and nxt:
+                prev_nxt, count = self._edge_blocked
+                self._edge_blocked = (nxt, count + 1 if prev_nxt == nxt else 1)
+            elif self._edge_blocked[0] != nxt:
+                self._edge_blocked = (None, 0)
+        else:
+            self._edge_blocked = (None, 0)
 
         # 冲锋型对手在线识别（V3.25，按位置/行为，不认 ID）：在途任务分
         # ≥30（蹲点型到关前恒 0）+ 走廊推进从未回头（农任务型会游走回撤）
@@ -750,9 +766,12 @@ class PlannerStrategy(BaselineStrategy):
                         and not self._opp_at_node(state, nxt)
                         and state.round - last_weaken >= self.WEAKEN_RESEND_GAP):
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
+                escape = self._edge_guard_escape(state, nxt, plan)
+                if escape:
+                    return P.a_move(escape)
                 return None
-            # 移动中只能用马类资源或疾行令：没有移动增益就顺手上马（不耽误本帧推进）。
-            # （V3.12 删停滞看门狗改道：8.2 移动中不能改道，该分支从未生效）
+            # 移动中默认只用马类资源或疾行令；敌卡冻结的三角改道只在上面的
+            # MOVE_BLOCKED_BY_GUARD 窄门里触发。
             # 马匹经济：T06 类任务要消耗整匹马，留足预留量才骑（详见 planner）
             res = me.get("resources") or {}
             if not state.has_move_buff():
@@ -1428,6 +1447,41 @@ class PlannerStrategy(BaselineStrategy):
         if not horse_path:
             return False
         return base_frames - horse_frames >= self.HORSE_CLAIM_MIN_SAVE
+
+    def _edge_guard_escape(self, state, blocked, plan):
+        """边上被敌卡冻结后的三角改道。
+
+        主办方确认：移动中不能原路返回，但可改去起点的其它相邻节点；
+        若该相邻节点也连着 blocked，就能从侧边再强闯/攻坚。这里只在
+        服务端已连续回 MOVE_BLOCKED_BY_GUARD 后启用，避免正常移动误改道。
+        """
+        me = state.me
+        cur = me.get("currentNodeId")
+        if not cur or not blocked:
+            return None
+        guard = state.enemy_guard(blocked) or {}
+        if (guard.get("defense", 0) or 0) < self.EDGE_REROUTE_MIN_DEFENSE:
+            return None
+        if self._edge_blocked[0] != blocked \
+                or self._edge_blocked[1] < self.EDGE_REROUTE_MIN_BLOCKED:
+            return None
+        if plan and plan.slack < self.EDGE_REROUTE_MIN_SLACK:
+            return None
+        best = None
+        best_cost = math.inf
+        graph = state.graph
+        for alt, edge1 in graph.neighbors(cur):
+            if alt == blocked or state.is_blocked(alt):
+                continue
+            edge2 = graph.edge_between(alt, blocked)
+            if not edge2:
+                continue
+            cost = graph.edge_frames(edge1, state.my_speed()) \
+                + graph.edge_frames(edge2, state.my_speed())
+            if cost < best_cost:
+                best = alt
+                best_cost = cost
+        return best
 
     # ---------- 情报：空转帧顺手用（V3.12）----------
     # 注定 WAIT 的帧（排队/防陷阱/蹲刷等）不占主车队移动时间，此时若手里有情报，

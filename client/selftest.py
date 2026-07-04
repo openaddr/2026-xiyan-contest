@@ -757,21 +757,28 @@ def test_edge_block():
     with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
         inquire = json.load(f)["msg_data"]
 
-    def edge_state(guard_def=6, squad=6, opp_setting=False, on_edge=True):
+    def edge_state(guard_def=6, squad=6, opp_setting=False, on_edge=True,
+                   cur="S09", nxt="S10", edge_id="E05", rejected=False):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
         d["round"] = 320
         d["contests"], d["tasks"] = [], []
+        d["events"] = []
+        if rejected:
+            d["events"].append({"type": "ACTION_REJECTED",
+                                "payload": {"playerId": 1001,
+                                            "action": "MOVE",
+                                            "errorCode": P.E_MOVE_BLOCKED_BY_GUARD}})
         for p in d["players"]:
             if p["playerId"] == 1001:
-                if on_edge:  # 挂在 E05 (S09->S10) 半路
-                    p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
-                             routeEdgeId="E05", currentProcess=None, buffs=[],
+                if on_edge:  # 挂在边上
+                    p.update(state="MOVING", currentNodeId=cur, nextNodeId=nxt,
+                             routeEdgeId=edge_id, currentProcess=None, buffs=[],
                              squadAvailable=squad, resources={}, freshness=95.0,
                              goodFruit=96, badFruit=1)
                 else:        # 停在 S09
-                    p.update(state="IDLE", currentNodeId="S09", nextNodeId=None,
+                    p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
                              routeEdgeId=None, currentProcess=None, buffs=[],
                              squadAvailable=squad, resources={}, freshness=95.0,
                              goodFruit=96, badFruit=1)
@@ -783,7 +790,7 @@ def test_edge_block():
             n["hasObstacle"] = False
             n["guard"] = None
             n["resourceStock"] = {}
-            if n["nodeId"] == "S10" and guard_def:
+            if n["nodeId"] == nxt and guard_def:
                 n["guard"] = {"ownerTeamId": "BLUE", "defense": guard_def,
                               "maxDefense": 7, "active": True}
         gs.on_inquire(d)
@@ -798,6 +805,21 @@ def test_edge_block():
     ok &= check("边冻结: 主车队不提交无效动作",
                 not any(x["action"] in ("MOVE", "BREAK_GUARD", "FORCED_PASS")
                         for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 1b) 主办方确认的边上换目标：已连续被敌卡拒绝，且有三角邻站时，
+    #     从 S07->S09 的边上改去 S05，之后可从 S05 对 S09 强闯/攻坚。
+    st_escape = PlannerStrategy()
+    st_escape._edge_blocked = ("S09", 1)
+    a = st_escape.decide(edge_state(cur="S07", nxt="S09", edge_id="E04",
+                                    rejected=True))
+    ok &= check("边冻结: 连续被卡后三角改道",
+                any(x["action"] == "MOVE" and x["targetNodeId"] == "S05"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+    ok &= check("边冻结: 改道同时保留削弱",
+                any(x["action"] == "SQUAD_WEAKEN" and x["targetNodeId"] == "S09"
+                    for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # 2) 边上被冻结但无人手 -> 不崩溃，不发无效动作
@@ -953,8 +975,8 @@ def test_horse_economy():
 def test_watchdog():
     """人手账本兜底：squadAvailable 字段缺失也能派削弱。
 
-    V3.12 删除了停滞看门狗改道：任务书 8.2 明确移动中只能 WAIT/续走当前
-    目标/用马，中边 MOVE 改道是非法动作，该分支在真实服务端永远无法生效。"""
+    V3.55 只允许已被敌卡拒绝后的三角换目标；无敌卡/无拒绝反馈的停滞
+    看门狗仍不能乱改道。"""
     ok = True
     with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
         start = json.load(f)["msg_data"]
@@ -993,8 +1015,7 @@ def test_watchdog():
                     for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 2) V3.12 回归：中边不再提交非法改道 MOVE（8.2 移动中不能改道，
-    #    该看门狗分支在真实服务端只会刷非法动作计数）
+    # 2) 无敌卡/无拒绝反馈时：中边不提交看门狗改道 MOVE
     gs2 = GameState(1001)
     gs2.on_start(start)
     st2 = PlannerStrategy()
@@ -1004,7 +1025,7 @@ def test_watchdog():
         a = st2.decide(gs2)
         if any(x["action"] == "MOVE" and x["targetNodeId"] != "S10" for x in a):
             fired = True
-    ok &= check("看门狗: 中边不发非法改道", not fired)
+    ok &= check("看门狗: 无敌卡时中边不乱改道", not fired)
     return ok
 
 

@@ -662,9 +662,13 @@ S02 首次 DRAW 后第二窗低盘口弃权止损；任务分封顶且站住 S10
 3.53 只拦直送计划；低分站上后段任务泉时，即使当前计划是领情报或去相邻关隘做任务，
 也先吃脚下同点短任务</b></td>
 <td>回应 2026-07-05T011000：r324 到 S10 后先领情报并转 S11，导致 T012/T014 过期，最终 120:150 小分败；selftest 加资源计划/异点任务计划钉子</td></tr>
+<tr><td><b>3.55 edge-reroute</b></td><td><b>边冻结三角改道灰度：
+连续收到 MOVE_BLOCKED_BY_GUARD、目标为高防敌卡，且存在“当前起点-三角邻站-被卡点”时，
+主车队改去三角邻站；同帧仍保留小分队削弱</b></td>
+<td>回应主办方确认的“边上不能原路返回但可换其它邻站”；2744 vs 路人女主 r233 S07→S09 被卡形态加钉子，低防/无拒绝反馈仍沿用旧削弱纪律</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.54-s10-score-rescue ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.55-edge-reroute ·
 自测 <code>python3 client/selftest.py</code></p>
 </div>
 
