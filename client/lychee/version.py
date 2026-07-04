@@ -131,4 +131,6 @@
 #        冰鉴顺手领取，避免 S07 这类确定鲜度收益被一刀切。
 # 3.46 = 小步几何释放：零设卡 farmer 边上收敛到咽喉且下一站可见任务
 #        预计读完早于我方抵达时，不再固定白等 12 帧。
-BUILD_VERSION = "3.46-farmer-converge-overlap"
+# 3.47 = 小步空转兑现：零设卡 farmer 防陷阱等待时，若脚下有短读条
+#        正边际任务且能装进等待窗，先领任务，把白等帧变成分数。
+BUILD_VERSION = "3.47-idle-task-during-farmer-wait"

@@ -11,7 +11,8 @@ import random
 
 from . import protocol as P
 from .planner import (TaskPlanner, FUNNEL_FIRST_WEATHER,
-                      FUNNEL_WEATHER_GAP, RUSH_EARLIEST)
+                      FUNNEL_WEATHER_GAP, RUSH_EARLIEST,
+                      marginal_task_value)
 
 # （V3.25 撤下按 playerId 的对手手册：地图会变、对手会变，ID 定制是
 # 过拟合——用户纠偏。前推偏置的激活改为对手位置/行为在线识别，见
@@ -170,6 +171,8 @@ class PlannerStrategy(BaselineStrategy):
     # 实锤：人手在探路/边上削弱里买穿后，走廊第二张卡只能干等风化
     SQUAD_CORRIDOR_RESERVE = 4
     GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
+    IDLE_TASK_MAX_PROC = 6      # 空转帧只顺手吃短任务，长读条仍交给规划器
+    IDLE_TASK_TRAP_WAIT = 6     # farmer 防陷阱等待的可兑现空窗
     # 顺路领取清单：默认只拿确定收益高的冰鉴/马。文书类出牌池收益不稳定，
     # 2 帧读条在小分差局会反噬；情报仍由 _should_claim_intel_en_route 动态加入。
     CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
@@ -902,7 +905,10 @@ class PlannerStrategy(BaselineStrategy):
             alt = self._trap_reroute(state, cur, nxt, target)
             if alt:
                 return P.a_move(alt)
-            return self._idle_upgrade(state, plan)
+            idle_wait = self.IDLE_TASK_TRAP_WAIT if (
+                self._opp_profile == "farmer" and not self.planner._guard_seen
+            ) else 0
+            return self._idle_upgrade(state, plan, min_wait=idle_wait)
         return P.a_move(nxt)
 
     # ---------- 主动设卡（V3）----------
@@ -1242,8 +1248,11 @@ class PlannerStrategy(BaselineStrategy):
     # 顺手标一个目标节点：效果与小分队探路相同（处理帧 -3，最低 2），但完全不占
     # 人手，机会成本≈0——专程为它停下不划算，只在反正要空等的帧里用。
 
-    def _idle_upgrade(self, state, plan):
+    def _idle_upgrade(self, state, plan, min_wait=0):
         me = state.me
+        task = self._idle_task_upgrade(state, plan, min_wait)
+        if task:
+            return P.a_claim_task(task["taskId"])
         if (me.get("resources") or {}).get(P.INTEL, 0) <= 0:
             return P.a_wait()
         cur = me.get("currentNodeId")
@@ -1273,6 +1282,43 @@ class PlannerStrategy(BaselineStrategy):
                 continue
             return P.a_use_resource(P.INTEL, target)
         return P.a_wait()
+
+    def _idle_task_upgrade(self, state, plan, min_wait=0):
+        """本来要空等时，顺手吃脚下短任务；只给显式长等待场景调用。"""
+        if min_wait <= 0 or state.phase != P.PHASE_NORMAL:
+            return None
+        me = state.me
+        cur = me.get("currentNodeId")
+        if not cur or me.get("verified"):
+            return None
+        if plan and plan.slack < self.IDLE_TASK_MAX_PROC + 10:
+            return None
+        opp = state.opp or {}
+        if opp and not opp.get("routeEdgeId") and opp.get("currentNodeId") == cur:
+            return None
+        base = me.get("taskScore", 0) or 0
+        best = None
+        best_key = None
+        for t in state.claimable_tasks():
+            if t.get("nodeId") != cur:
+                continue
+            if t.get("taskTemplateId") in ("T04", "T06"):
+                continue
+            proc = t.get("processRound", 4) or 4
+            if proc > min(min_wait, self.IDLE_TASK_MAX_PROC):
+                continue
+            expire = t.get("expireRound") or 0
+            if expire and state.round + proc > expire:
+                continue
+            if self.planner._opp_processing_task(state, t):
+                continue
+            value = marginal_task_value(base, t.get("score", 0) or 0)
+            if value <= 0:
+                continue
+            key = (value, t.get("score", 0) or 0, -proc)
+            if best is None or key > best_key:
+                best, best_key = t, key
+        return best
 
     # ---------- 突破敌方设卡 ----------
     # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
