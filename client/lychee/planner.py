@@ -43,10 +43,14 @@ CONTEST_PHASE_ENABLED = True
 # 边冲边农（S07/S10/S11 沿途农同样的 150 分），我们 S03 停留 15 帧在
 # 悬崖带射程（ETA≤125）之外，seed4/23 深链死局皆源于开局段落后。
 # 只作用于任务：资源口径不动（冰链血泪资产、马匹 T06 经济）
-FORWARD_BIAS_FLOOR = 1.0    # 1.0 = 关闭；扫描定参后改默认
+FORWARD_BIAS_FLOOR = 1.0    # 手动全局档（1.0=关）。全局开被 1344 局扫描
+                            # 证伪（camper 相位骰子），保留旋钮供实验
 FORWARD_BIAS_CUT = 0.0      # >0 时改用阶跃：进度 < CUT 的节点吃 FLOOR，
                             # 之后完全不动（只压真正的开局簇，不扰动
                             # 走廊邻近农任务的时序）
+FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（strategy.
+                            # _fwd_rush_tick 按位置/行为置 forward_rush_opp，
+                            # 不认对手 ID——地图会变对手会变，用户纠偏）
 # 阻挡节点的寻路惩罚按真实处理代价估：会计入 ETA，不能虚高
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
@@ -239,6 +243,8 @@ class TaskPlanner:
         self._choke_ahead_cache = (-1, False)
         self.FORWARD_BIAS_FLOOR = FORWARD_BIAS_FLOOR
         self.FORWARD_BIAS_CUT = FORWARD_BIAS_CUT
+        self.FORWARD_BIAS_AUTO = FORWARD_BIAS_AUTO
+        self.forward_rush_opp = False    # strategy 在线识别结论
         self._fwd_total = None
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
         self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
@@ -822,18 +828,23 @@ class TaskPlanner:
         self._cliff_cache = (state.round, active)
         return active
 
-    def _forward_factor(self, state, node_id):
-        """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
-        floor = self.FORWARD_BIAS_FLOOR
-        if floor >= 1.0:
-            return 1.0
-        total = self._fwd_total
-        if total is None:
+    def _map_total(self, state):
+        """起点到宫门的裸帧全程（缓存），进度/深度度量的分母。"""
+        if self._fwd_total is None:
             d, p = state.graph.shortest_path(
                 state.start_node, state.gate_node, P.BASE_SPEED) \
                 if state.start_node else (None, None)
-            total = d if p else 0
-            self._fwd_total = total
+            self._fwd_total = d if p else 0
+        return self._fwd_total
+
+    def _forward_factor(self, state, node_id):
+        """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
+        floor = self.FORWARD_BIAS_FLOOR
+        if self.forward_rush_opp:
+            floor = min(floor, self.FORWARD_BIAS_AUTO)
+        if floor >= 1.0:
+            return 1.0
+        total = self._map_total(state)
         if not total:
             return 1.0
         remain, path = state.graph.shortest_path(

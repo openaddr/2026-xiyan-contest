@@ -2589,19 +2589,44 @@ def test_contest_phase():
     f_late = pl_fb2._forward_factor(gs, "S13")
     ok &= check("前推: 开局节点降权且后段趋近 1",
                 f_early < 0.75 < 0.9 < f_late, f"S02={f_early:.2f} S13={f_late:.2f}")
-    # 6) 对手手册：opp_id 命中预设 → 首帧应用到 planner
-    SMOD.OPPONENT_BOOK[2002] = {"planner.FORWARD_BIAS_FLOOR": 0.6}
-    try:
-        st = PlannerStrategy()
-        st._absorb_feedback(gs_cp("S07", "S09"))
-        ok &= check("手册: 命中对手应用预设",
-                    st.planner.FORWARD_BIAS_FLOOR == 0.6, "")
-    finally:
-        del SMOD.OPPONENT_BOOK[2002]
-    st2 = PlannerStrategy()
-    st2._absorb_feedback(gs_cp("S07", "S09"))
-    ok &= check("手册: 未命中保持默认",
-                st2.planner.FORWARD_BIAS_FLOOR == 1.0, "")
+    # 6) 冲锋型在线识别（V3.25，撤 ID 手册后的触发方式）：
+    #    在途任务分 ≥30 + 从不回头 → 激活；蹲点型画像后到 → 撤销
+    del SMOD  # （V3.24 的 ID 手册已撤，import 保留位不再使用）
+
+    def absorb_seq(st, positions, task_score):
+        for pos, ts in zip(positions, task_score):
+            gs = gs_cp("S07", pos)
+            for p in gs.players.values():
+                if p["playerId"] != 1001:
+                    p["taskScore"] = ts
+            st._absorb_feedback(gs)
+        return st
+
+    # 正例：对手 S03→S07→S09 单调推进且任务分涨到 60 → 识别为冲锋型
+    st = absorb_seq(PlannerStrategy(), ["S03", "S07", "S09"], [0, 30, 60])
+    ok &= check("冲锋识别: 边冲边农触发",
+                st.planner.forward_rush_opp, "")
+    # 反例 1：任务分恒 0 的直线推进（蹲点/竞速型）→ 不触发
+    st = absorb_seq(PlannerStrategy(), ["S03", "S07", "S09"], [0, 0, 0])
+    ok &= check("冲锋识别: 零任务分不触发",
+                not st.planner.forward_rush_opp, "")
+    # 反例 2：回头游走的农任务型 → 不触发（S09 后回撤 S05）
+    st = absorb_seq(PlannerStrategy(), ["S03", "S07", "S09", "S05"],
+                    [0, 0, 0, 30])
+    ok &= check("冲锋识别: 回头游走不触发",
+                not st.planner.forward_rush_opp, "")
+    # 撤销：先触发，画像后到蹲点型 → 撤销
+    st = absorb_seq(PlannerStrategy(), ["S03", "S07", "S09"], [0, 30, 60])
+    st._opp_profile = "camper"
+    st._fwd_rush_tick(gs_cp("S07", "S10"))
+    ok &= check("冲锋识别: 蹲点画像后到即撤销",
+                not st.planner.forward_rush_opp, "")
+    # 因子联动：识别激活时 _forward_factor 吃 AUTO 地板
+    st = absorb_seq(PlannerStrategy(), ["S03", "S07", "S09"], [0, 30, 60])
+    gs = gs_cp("S07", "S09")
+    f = st.planner._forward_factor(gs, "S02")
+    ok &= check("冲锋识别: 激活后前期节点降权",
+                f < 0.75, f"factor={f:.2f}")
     return ok
 
 
