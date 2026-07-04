@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.27-road-tax)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.28-rule-hardening)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.27-road-tax</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.28-rule-hardening</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -580,9 +580,16 @@ selftest 213 项全绿。观察清单：seed 4/23 深链死局（纯节奏救不
 先验）混合 × 驻留/路过窗口信用 × 边际任务分 × 竞争折扣，上限一个任务</b></td>
 <td>刻度诚实注记：本图两走廊原始刷新数几乎打平（山 8 vs 官 7），刷新流的价值在波次驻留决策，扳走廊靠
 去重。selftest 全绿（+5 钉子）+ smoke 全绿 + camper/toller 热种子逐位</td></tr>
+<tr><td><b>3.28 rule-hardening</b></td><td><b>规则实锤三修（漏洞审计 S0/S1 清账）：①配额豁免反向漏洞——任务书
+921"第 3 张卡顶掉最早的"，"对手双卡=无弹药直接过边"可被两张废卡钓鱼，删除（唯一硬门=KEY_PASS/宫门 1 好果
+底价）；②RUSH 设卡解禁（6.5 只禁小分队）+ 宫前驿 PALACE_STATION 入设卡类型门——2839 的 r450 S13 二卡镜像；
+③session 保命网——处理层异常=跳帧+心跳（曾有 KeyError 穿透杀进程 → 连缺 60 帧退赛 0 分），传输层异常干净
+落地，on_start 失败不阻断 ready</b></td>
+<td>配额旧用例按规则翻转重写（WAIT 为正确行为）；新增 RUSH 宫前驿回手卡、双保命网用例。selftest 全绿 +
+smoke 全绿 + camper×8/toller×3/farmer×2/镜像 热种子无新未交付（seed10 -21 谨慎税，可接受）</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.27-road-tax ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.28-rule-hardening ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 

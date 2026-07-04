@@ -2732,16 +2732,17 @@ def test_trap_ransom():
     ok &= check("租买: 真漏斗口绕不开照旧等待",
                 last and last["action"] == "WAIT", str(last))
 
-    # 2b) 无弹药豁免（V3.20）：对手两张卡配额已满 → 占位无冻结威胁，直接过
-    #     （task_score=130 关掉 S09 的蹲刷分支，隔离被测逻辑，同用例 3）
+    # 2b) 配额语义修正（V3.28，规则 921）：曾把"对手两张卡配额已满"当
+    #     无弹药豁免直接过——但规则原文是第 3 张卡合法且顶掉最早的
+    #     （已扣成本不返还，无额外代价）。对手挂两张废卡就能骗过豁免
+    #     再掐踏边。正确行为：占位威胁仍在，继续等待
     gs = gs_camp("S09", "S10", task_score=130)
     for nid in ("S05", "S07"):   # 对手的两张激活卡在别处
         gs.nodes[nid]["guard"] = {"ownerTeamId": "BLUE", "defense": 3,
                                   "maxDefense": 7, "active": True}
     a = PlannerStrategy().main_action(gs)
-    ok &= check("租买: 对手卡配额用满则占位无威胁直接过",
-                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
-                str(a))
+    ok &= check("租买: 对手卡配额满仍是威胁（921 第三张顶掉旧卡）",
+                a and a["action"] == "WAIT", str(a))
 
     # 2c) 无弹药豁免之二：KEY_PASS 底价 1 好果掏不出 → 同样直接过
     gs = gs_camp("S09", "S10", task_score=130)
@@ -3148,6 +3149,101 @@ def test_road_tax():
     return ok
 
 
+def test_rule_fixes():
+    """V3.28 规则实锤修复：①RUSH 设卡解禁（6.5 只禁小分队）+ 宫前驿
+    入列（2839 二卡镜像）②session 保命网（合法 JSON 坏结构不许杀进程）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    # ---- ① RUSH 后卡：r455 我们领跑停靠 S13（宫前驿），对手 S11 在追
+    #      （ETA ~35 在 8~150 窗口内）→ 应回手一张卡收尾段税
+    gs = GameState(1001)
+    gs.on_start(start)
+    d = json.loads(json.dumps(inquire))
+    d["round"], d["phase"] = 455, "RUSH"
+    d["contests"], d["tasks"] = [], []
+    d["weather"] = {"active": [], "forecast": []}
+    for p_ in d["players"]:
+        if p_["playerId"] == 1001:
+            p_.update(state="IDLE", currentNodeId="S13", nextNodeId=None,
+                      routeEdgeId=None, currentProcess=None, buffs=[],
+                      resources={}, freshness=90.0, goodFruit=90, badFruit=0,
+                      taskScore=150, verified=False)
+        else:
+            p_.update(state="IDLE", currentNodeId="S11", nextNodeId=None,
+                      routeEdgeId=None, currentProcess=None, buffs=[],
+                      delivered=False, retired=False, taskScore=150)
+    for n in d["nodes"]:
+        n["hasObstacle"] = False
+        n["guard"] = None
+        n["resourceStock"] = {}
+        # 保留 S13 的宫前交接处理会挡在设卡之前，本用例只测设卡时机，
+        # 统一清掉处理需求
+        n.pop("processType", None)
+        n["processRound"] = 0
+    gs.on_inquire(d)
+    st = PlannerStrategy()
+    st._processed_here = True
+    a = st.main_action(gs)
+    ok &= check("规则: RUSH 领跑过宫前驿回手卡（2839 二卡镜像）",
+                a and a["action"] == "SET_GUARD"
+                and a.get("targetNodeId") == "S13", str(a))
+
+    # ---- ② session 保命网：合法 JSON 但缺关键字段的 inquire 不杀进程
+    from lychee.session import StrategySession
+    from lychee_basic_client.config import Config
+
+    class FakeSock:
+        def __init__(self):
+            self.sent = []
+        def sendall(self, b):
+            self.sent.append(b)
+
+    cfg = Config(host="x", port=1, player_id=1001, player_name="t",
+                 version="test")
+    sess = StrategySession.__new__(StrategySession)
+    sess._sock = FakeSock()
+    sess._config = cfg
+    sess._match_id = "M"
+    from lychee.log import get_logger
+    sess.log = get_logger(1001)
+    sess.state = GameState(1001)
+    sess.state.on_start(start)
+    sess.strategy = PlannerStrategy()
+    # players 缺 playerId、nodes 缺 nodeId——曾是穿透 run() 的 KeyError 型毒帧
+    poison = {"round": 7, "players": [{"noPlayerId": True}],
+              "nodes": [{"broken": 1}], "edges": []}
+    try:
+        sess._handle_inquire(poison)
+        survived = True
+    except Exception:
+        survived = False
+    ok &= check("保命网: 坏结构 inquire 不杀进程且已回包",
+                survived and len(sess._sock.sent) == 1, f"sent={len(sess._sock.sent)}")
+    # run() 级别：_handle_message 抛异常 → 跳帧 + 心跳（不退出）
+    sent0 = len(sess._sock.sent)
+    def boom(_msg):
+        raise KeyError("round")
+    sess._handle_message = boom
+    import types
+    # 手工模拟 run() 的保命网分支（不真起 socket 读循环）
+    try:
+        try:
+            sess._handle_message({"msg_name": "inquire", "msg_data": {"round": 9}})
+        except Exception:
+            sess._safe_heartbeat(9)
+        net_ok = True
+    except Exception:
+        net_ok = False
+    ok &= check("保命网: 处理层异常兜底心跳可发出",
+                net_ok and len(sess._sock.sent) == sent0 + 1,
+                f"sent={len(sess._sock.sent)}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -3183,6 +3279,7 @@ def main():
     ok &= test_opp_profile()
     ok &= test_farm_meta()
     ok &= test_road_tax()
+    ok &= test_rule_fixes()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

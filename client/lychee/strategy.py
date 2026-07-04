@@ -182,7 +182,11 @@ class PlannerStrategy(BaselineStrategy):
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
 
     # ---- 主动设卡（V3）----
-    GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE"}  # 咽喉类节点
+    # 咽喉类节点 + 宫前驿（V3.28：2839 的二卡就落在 S13 PALACE_STATION，
+    # r450 掐 RUSH 起点收尾段 35~70 帧税——普通节点免底价，这张卡对
+    # 领跑者近乎免费；此前类型门把它整个排除在我们的武器库外）
+    GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE",
+                        "PALACE_STATION"}
     GUARD_MIN_OPP_ETA = 8       # 对手至少 8 帧后才到（4 帧读条 + 生效余量）
     GUARD_MAX_OPP_ETA = 150     # 太远则风化/悬赏先到，白设
     # V3.12：80 → 65。V3.7 修了 ETA 度量后 4 局仍 0 次设卡——replay31 领跑局
@@ -714,8 +718,10 @@ class PlannerStrategy(BaselineStrategy):
 
     def _guard_opportunity(self, state, cur, plan):
         me, opp = state.me, state.opp
-        if state.phase == P.PHASE_RUSH:
-            return None
+        # V3.28 删 RUSH 自禁：任务书 6.5 冲刺后只禁"新提交小分队动作"，
+        # SET_GUARD 是主车队动作不在其列（2839 复盘根因 D 的"不对称
+        # 枷锁"——对面专挑 r450 落 S13 二卡，我们规则上完全可以对等
+        # 奉还却自缚手脚）。交付安全由既有 slack 闸门兜底
         if not opp or opp.get("delivered") or opp.get("retired"):
             return None
         node = state.node(cur)
@@ -1115,15 +1121,17 @@ class PlannerStrategy(BaselineStrategy):
     def _opp_can_guard(state, node_id):
         """对手此刻能否在 node_id 落一张有效卡（中边冻结威胁的存在性）。
 
-        规则口径：每队同时激活的卡至多 2 张；KEY_PASS/宫门设卡有 1 好果
-        底价（普通节点 d2 免费）。任一条不满足 → 占位无冻结威胁。
+        V3.28 修正（规则审计确认级发现）：曾把"对手已有 2 张有效卡"当
+        无弹药豁免——但任务书 921 行原文是"新设卡完成后超过 2 个，移除
+        本队最早完成的有效设卡，已扣成本不返还"，即第 3 张卡完全合法且
+        顶掉旧卡无额外代价。配额子句是反向漏洞：对手挂两张免费废卡就能
+        让全部中边陷阱防御静默失效，再掐我们的踏边。删除。
+        唯一的规则硬门是果品底价：KEY_PASS/宫门 1 好果（普通节点免费）。
         """
         opp = state.opp
         if not opp:
             return False
-        if sum(1 for nid in state.nodes if state.enemy_guard(nid)) >= 2:
-            return False
-        if state.node(node_id).get("nodeType") == "KEY_PASS" \
+        if state.node(node_id).get("nodeType") in ("KEY_PASS", "GATE") \
                 and (opp.get("goodFruit", 0) or 0) < 1:
             return False
         return True
