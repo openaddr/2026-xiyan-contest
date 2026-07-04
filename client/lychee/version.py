@@ -73,4 +73,7 @@
 # 3.34 = replay95 复盘：高分 farmer 正在向 S10/S11 收敛时，原 farmer
 #        有界等待只覆盖 camped 读条，导致 S09+S10 白等 36 帧、同分输用时；
 #        新增零设卡高分 farmer 收敛短等封顶。
-BUILD_VERSION = "3.34-farmer-converge-walkin"
+# 3.35 = 稳健回滚与平台输局修复：撤回 S02 弃权反同步（外部对手有送分风险）；
+#        收紧边农边冲无卡证据抢长边，防真实 lose 批次中段设卡冻结复发；
+#        全量 FRONT_TEMPO 仍关，仅恢复"对手已有任务分/冲锋证据"下的山路线保速轻门。
+BUILD_VERSION = "3.35-stability-guard-tempo"

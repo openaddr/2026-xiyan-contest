@@ -63,8 +63,10 @@ FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（st
 # 对手只先走几帧时不该改道认怂，而是尾随主路；所以这里只拦低进度/
 # 山线停留，不拦官道跟随。过了中段后硬件资源价值上调，补回前面放弃的
 # 非关键经济。V3.32 审计：陪练电池无 2986 官道型代表，子系统实测净负，
-# 默认关闭；保留旋钮，待平台新战报或新增形态陪练复证后再开。
+# 全量门默认关闭；V3.35 只恢复山路线轻门，覆盖平台 lose 批次里最稳定的
+# "已有基础分后被 S06/S08 山路拖走"负样本。
 FRONT_TEMPO_ENABLED = False
+FRONT_TEMPO_MOUNTAIN_RECOVERY = True
 FRONT_TEMPO_PROGRESS_CUT = 0.22
 FRONT_TEMPO_BASE_CAP = 90
 FRONT_TEMPO_OPP_LEAD = 3
@@ -333,6 +335,7 @@ class TaskPlanner:
         self.FORWARD_BIAS_CUT = FORWARD_BIAS_CUT
         self.FORWARD_BIAS_AUTO = FORWARD_BIAS_AUTO
         self.FRONT_TEMPO_ENABLED = FRONT_TEMPO_ENABLED
+        self.FRONT_TEMPO_MOUNTAIN_RECOVERY = FRONT_TEMPO_MOUNTAIN_RECOVERY
         self.FRONT_TEMPO_PROGRESS_CUT = FRONT_TEMPO_PROGRESS_CUT
         self.FRONT_TEMPO_BASE_CAP = FRONT_TEMPO_BASE_CAP
         self.FRONT_TEMPO_OPP_LEAD = FRONT_TEMPO_OPP_LEAD
@@ -1152,7 +1155,8 @@ class TaskPlanner:
                                   penalty, ecost, base):
         """早段路线承诺闸门：低进度/山线任务先让，等 S07/S10 波次补分。"""
         if not self._front_tempo_active(state, cur, base):
-            return False
+            return self._front_tempo_mountain_recovery_blocked(
+                state, task, cur, pos, speed, penalty, ecost, base)
         _, path = state.graph.shortest_path(cur, pos, speed, penalty, ecost)
         if self._front_tempo_blocks_path(state, path):
             return True
@@ -1160,6 +1164,36 @@ class TaskPlanner:
         progress = min(self._map_progress(state, pos),
                        self._map_progress(state, task_node))
         return progress < self.FRONT_TEMPO_PROGRESS_CUT
+
+    def _front_tempo_mountain_recovery_blocked(self, state, task, cur, pos,
+                                               speed, penalty, ecost, base):
+        """平台保速轻门：默认只拦前段竞争态的山线任务/山线路径。
+
+        V3.32 关闭全量 FRONT_TEMPO 后，本地哨兵更稳，但平台 lose 批次
+        重新暴露 2986/2931 型问题：已有基础分时被 S06/S08 山路任务拖走，
+        对手先入 S10/S11 后建立卡点。这里不恢复资源截停，只把最稳定的
+        山线岔路负样本收回来。
+        """
+        if not self.FRONT_TEMPO_MOUNTAIN_RECOVERY:
+            return False
+        if self.FRONT_TEMPO_ENABLED or state.phase != P.PHASE_NORMAL:
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) < 30 or (base or 0) >= self.FRONT_TEMPO_BASE_CAP:
+            return False
+        opp = state.opp or {}
+        if (opp.get("taskScore") or 0) < self.RACE_CLIFF_OPP_FARM \
+                and self._opp_tempo_mode(state) not in ("rusher", "farm-rusher"):
+            return False
+        if not self._front_tempo_contested(state, cur):
+            return False
+        if not self._key_pass_ahead(state, cur, penalty, ecost):
+            return False
+        bucket = self._task_route_bucket(state, task, pos)
+        if bucket == P.MOUNTAIN:
+            return True
+        _, path = state.graph.shortest_path(cur, pos, speed, penalty, ecost)
+        return self._front_tempo_blocks_path(state, path)
 
     def _front_tempo_resource_blocked(self, state, cur, node_id, path):
         """早段不专程钻支线拿资源；贴着对手主路的硬件资源仍可争。"""

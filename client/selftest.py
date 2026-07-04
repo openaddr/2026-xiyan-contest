@@ -2915,8 +2915,9 @@ def test_trap_ransom():
         last = st2.main_action(gs_camp("S09", "S10", round_no=200 + i))
     ok &= check("租买: 真漏斗口绕不开照旧等待",
                 last and last["action"] == "WAIT", str(last))
-    # 2a) 山路口袋遇高分贴宫门且从未露卡的边农边冲者，只短等观察；
-    #     不起卡就抢边，避免 2986/2738 式 S08/S10 前 40+ 帧乌龟等待。
+    # 2a) 山路口袋遇高分贴宫门且从未露卡的边农边冲者，仍不把
+    #     "尚无卡证据"当安全证据：真实平台 lose 批次显示首卡常在
+    #     我方已上长边后才落下，抢边会被中段冻结。
     st_probe = PlannerStrategy()
     moved = None
     for i in range(14):
@@ -2926,8 +2927,8 @@ def test_trap_ransom():
         if a and a["action"] == "MOVE":
             moved = a
             break
-    ok &= check("租买: 山口边农边冲无卡证据短等后抢边",
-                moved and moved["targetNodeId"] == "S10", str(moved))
+    ok &= check("租买: 山口边农边冲无卡证据不抢长边",
+                moved is None, str(moved))
 
     # 2b) 配额语义修正（V3.28，规则 921）：曾把"对手两张卡配额已满"当
     #     无弹药豁免直接过——但规则原文是第 3 张卡合法且顶掉最早的
@@ -3613,13 +3614,13 @@ def test_farmer_walkin():
         if a and a["action"] == "MOVE":
             moved = a
             break
-    ok &= check("边农边冲: 已停靠口袋点才允许短等后抢边",
-                moved and moved["targetNodeId"] == "S10", str(moved))
+    ok &= check("边农边冲: 已停靠口袋点仍不抢可设卡长边",
+                moved is None, str(moved))
     return ok
 
 
 def test_front_tempo_tail_follow():
-    """V3.30/V3.32：FRONT_TEMPO 默认关闭；显式打开时保留尾随钉子。"""
+    """V3.30/V3.35：全量 FRONT_TEMPO 仍关；山路线保速轻门默认开。"""
     ok = True
     with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
         start = json.load(f)["msg_data"]
@@ -3674,6 +3675,8 @@ def test_front_tempo_tail_follow():
     pl = TaskPlanner()
     ok &= check("前段尾随: 默认关闭，等待平台形态复证",
                 not pl.FRONT_TEMPO_ENABLED, "")
+    ok &= check("前段保速: 山路线轻门默认开启",
+                pl.FRONT_TEMPO_MOUNTAIN_RECOVERY, "")
     pl.FRONT_TEMPO_ENABLED = True
     pl._map_progress = lambda state, cur: 0.1
     pl._opp_on_my_forward_path = lambda state, cur: False
@@ -3717,7 +3720,8 @@ def test_front_tempo_tail_follow():
                 pen_rich("S10") + 10 < pen_poor("S10"),
                 f"poor={pen_poor('S10'):.1f} rich={pen_rich('S10'):.1f}")
 
-    def gs_replay93(cur, base, tasks, opp_cur, opp_next, opp_edge):
+    def gs_replay93(cur, base, tasks, opp_cur, opp_next, opp_edge,
+                    opp_task_score=0):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -3737,7 +3741,8 @@ def test_front_tempo_tail_follow():
                          nextNodeId=opp_next, routeEdgeId=opp_edge,
                          edgeTotalMs=edge_total, edgeProgressMs=edge_total - 5000,
                          currentProcess=None, buffs=[],
-                         delivered=False, retired=False, taskScore=0)
+                         delivered=False, retired=False,
+                         taskScore=opp_task_score)
         for n in d["nodes"]:
             n["hasObstacle"] = n["nodeId"] in {"S06", "S08"}
             n["guard"] = None
@@ -3752,11 +3757,11 @@ def test_front_tempo_tail_follow():
              "expireRound": 300, "active": True, "completed": False,
              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
              "routeBucket": P.MOUNTAIN}
-    gs = gs_replay93("S03", 30, (t_s06,), "S02", "S03", "E02")
+    gs = gs_replay93("S03", 30, (t_s06,), "S02", "S03", "E02",
+                     opp_task_score=30)
     st3 = PlannerStrategy()
-    st3.planner.FRONT_TEMPO_ENABLED = True
     plan = st3.planner.plan(gs)
-    ok &= check("前段保速: S03 已拿30后不做 S06 山路清障",
+    ok &= check("前段保速: 默认不做 S06 山路清障",
                 plan.kind != "task", repr(plan))
 
     t_s07 = {"taskId": "T_S07_OVER", "taskTemplateId": "T01",
