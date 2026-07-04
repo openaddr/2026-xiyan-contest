@@ -107,7 +107,7 @@ RACE_CLIFF_OPP_FARM = 30    # 对手在途 taskScore ≥ 此值 → 它一路在
                             # 不是在抢关，悬崖不成立（行为证据，与 V3.18
                             # 出牌频率画像同级；A/B 实测不加这道门 farmer
                             # 局 48/48→42/48、镜像均分 -53——弃经济抢一场
-                            # 不存在的竞速。语料里的抢关者到关前分数恒 0）
+                            # 不存在的竞速。语料里的脚本抢关者到关前分数恒 0）
 RACE_CLIFF_FRAME_VALUE = 30.0
 
 # 漏斗定价（V3.16）：全图汇于关键关隘（武关 S10 类），谁后到谁挨卡。
@@ -741,6 +741,11 @@ class TaskPlanner:
         """
         if self._cliff_cache[0] == state.round:
             return self._cliff_cache[1]
+        # （V3.22 证伪注：曾试"推进判据"——对手边农边向宫门净推进 ≥18/30
+        # 帧时取消农任务豁免，想覆盖 2839 式"在途 90 分仍领跑"。电池否决：
+        # 走向下一个任务点的农夫也被判成赶路者，镜像 -18 / farmer 48→40 /
+        # toller 48→42，三形态齐跌。"悬崖对边农边抢关者失效"保留在观察
+        # 清单，等真实回放里出现可分离信号再动）
         active = False
         opp = state.opp or {}
         farming = (opp.get("taskScore") or 0) >= self.RACE_CLIFF_OPP_FARM

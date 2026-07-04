@@ -1336,15 +1336,17 @@ def test_trap_proof():
     ok &= check("防陷阱: 首卡也设防(无前科照等)",
                 a and a["action"] == "WAIT", str(a))
 
-    # 0b) 地形门：下一跳是普通驿站（非咽喉）→ 不等待（replay27 误伤兜底：
-    #     三段罚站中两段目标 STATION，本就不该等）
+    # 0b) 地形门已删（V3.22，2839 复盘根因 C）：普通驿站同样设防——
+    #     第一名的回手卡打的是走廊汇入点不限咽喉（实战第 4 局 S09 掐
+    #     踏边 118 帧、离线 TollerBot 复现冻 60~120 帧）。replay27 想防
+    #     的误伤由等待上界兜底：过客做完站务就走，几帧 << 冻结代价
     gs = gs_tail()
     for n in gs.nodes.values():
         if n["nodeId"] == "S11":
             n["nodeType"] = "STATION"
     a = PlannerStrategy().main_action(gs)
-    ok &= check("防陷阱: 普通驿站不设防",
-                a and a["action"] == "MOVE", str(a))
+    ok &= check("防陷阱: 普通驿站同样设防(V3.22)",
+                a and a["action"] == "WAIT", str(a))
 
     # 1) 对手正站在我们的下一跳（咽喉 S11）→ 不上边，等待
     a = PlannerStrategy().main_action(gs_tail())
@@ -2356,6 +2358,135 @@ def test_race_cliff():
     return ok
 
 
+def test_parting_guard():
+    """临别卡应对（2839 复盘根因 A 的回归钉子，场景=真实 r309~311）。
+
+    第一名在武关农 8 帧任务、落防 6 卡即走。正确应对三连：卡主在场
+    （新卡）→ 宽限等待；卡主踏边离场 → 2好1坏果拆卡（省 45 帧税）；
+    真坐地户（闲置 ≥CAMPER_ESTABLISHED）→ 免宽限直接强通。V3.22 修正：
+    坐地户驻留口径排除做任务帧——农 20+ 帧再落卡的过客不再被误判。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_pg(opp_on_edge=False, opp_proc=None, round_no=310,
+              with_guard=True, bad=1, phase="NORMAL", defense=6,
+              complete=None):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["phase"] = phase
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S08", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=97,
+                         badFruit=bad, taskScore=150, squadAvailable=6)
+            elif opp_on_edge:
+                p.update(state="MOVING", currentNodeId=None, nextNodeId="S11",
+                         routeEdgeId="E06", currentProcess=None,
+                         delivered=False, retired=False, taskScore=120,
+                         goodFruit=96)
+            else:
+                p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=opp_proc,
+                         delivered=False, retired=False, taskScore=120,
+                         goodFruit=96)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+            n["guard"] = ({"ownerTeamId": "BLUE", "defense": defense,
+                           "initialDefense": 6, "active": True,
+                           "completeRound": complete
+                           if complete is not None else round_no - 1}
+                          if (n["nodeId"] == "S10" and with_guard) else None)
+        gs.on_inquire(d)
+        return gs
+
+    PROC = {"remainRound": 3, "targetNodeId": "S10"}
+
+    def warmed(since, doing, until=310):
+        """预热驻留/首见追踪：对手 since 起停在 S10，卡 r309 起可见。"""
+        st = PlannerStrategy()
+        for r in range(since, until):
+            st._absorb_feedback(gs_pg(opp_proc=PROC if doing else None,
+                                      round_no=r, with_guard=(r >= 309)))
+        return st
+
+    # 1) 卡主已踏边离开 → 拆卡（真实 r310+：不拆就是 45 帧税，四局 0:3 主因）
+    st = warmed(301, True)
+    gs = gs_pg(opp_on_edge=True)
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: 卡主离场即拆卡",
+                a and a["action"] == "BREAK_GUARD"
+                and a["targetNodeId"] == "S10", str(a))
+    # 2) 卡主在场、边农边停 9 帧（过客）→ 宽限等待，不强通
+    st = warmed(301, True)
+    gs = gs_pg(opp_proc=PROC)
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: 农任务过客给宽限",
+                a is None or a["action"] not in ("FORCED_PASS",
+                                                 "BREAK_GUARD"), str(a))
+    # 3) 真坐地户（闲置 25 帧）→ 免宽限直接强通
+    st = warmed(285, False)
+    gs = gs_pg()
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: 闲置坐地户免宽限强通",
+                a and a["action"] == "FORCED_PASS", str(a))
+    # 4) 驻留口径刻意含做任务帧：农 25 帧再落卡的按坐地户免宽限强通。
+    #    曾试"闲置驻留"口径把这类判成过客——给 CamperBot delay 变体多送
+    #    5 帧宽限与其动身帧共振，camper seed0/5 走廊时序拖死；语料里也
+    #    没有"长农过客"形态（2839 只驻留 8 帧）。反过拟合纪律：回退
+    st = warmed(285, True)
+    gs = gs_pg(opp_proc=PROC)
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: 长农驻留按坐地户处理(刻意)",
+                a and a["action"] == "FORCED_PASS", str(a))
+    # 5) 根因 D（2839 掐 r450 RUSH 起点落二卡，我们坏果已尽，攻坚上限
+    #    4 < 防 5；RUSH 期小分队违规 SQUAD_NOT_ALLOWED 削弱不可用）：
+    #    风化时刻表公开可算——防守降到攻坚上限的等待若 < 强通税就等。
+    #    卡 r400 落成防 6，r460 已风化到 5，下一次风化 r505（等 45>43?
+    #    KEY_PASS 税 40…用防5: 15+25=40，等待 45 不划算→改用近例：
+    #    complete=r399，首风化 45 → r444 掉到 5，二次 r474 掉到 4=上限，
+    #    r460 决策时等 14 帧 < 税 40-2 → 等到可拆
+    st = PlannerStrategy()
+    gs = gs_pg(opp_on_edge=True, bad=0, phase="RUSH", defense=5,
+               round_no=460, complete=399)
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: RUSH期弹尽等风化到可拆",
+                a and a["action"] not in ("FORCED_PASS", "BREAK_GUARD",
+                                          "MOVE"), str(a))
+    # 5b) 风化太远（新卡防 6，降到 4 要 ~104 帧 > 税 45）→ 强通兜底
+    st = PlannerStrategy()
+    gs = gs_pg(opp_on_edge=True, bad=0, phase="RUSH", defense=6,
+               round_no=460, complete=459)
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: 风化太远仍强通兜底",
+                a and a["action"] == "FORCED_PASS", str(a))
+    # 5c) 对照：坏果在手（攻坚值 7 ≥ 5）→ 直接拆，不等不税
+    st = PlannerStrategy()
+    gs = gs_pg(opp_on_edge=True, bad=1, phase="RUSH", defense=5,
+               round_no=460)
+    st._absorb_feedback(gs)
+    a = st.main_action(gs)
+    ok &= check("临别卡: RUSH期有弹药仍直接拆",
+                a and a["action"] == "BREAK_GUARD", str(a))
+    return ok
+
+
 def test_target_stickiness():
     """V3.18 目标粘性：换目标要求 15% 净值优势，消除同级目标间的震荡。"""
     ok = True
@@ -2668,6 +2799,7 @@ def main():
     ok &= test_lenient_frame()
     ok &= test_race_tempo()
     ok &= test_race_cliff()
+    ok &= test_parting_guard()
     ok &= test_target_stickiness()
     ok &= test_trap_ransom()
     ok &= test_card_profile()

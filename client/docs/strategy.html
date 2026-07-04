@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.21-race-cliff)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.22-toll-defense)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.21-race-cliff</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.22-toll-defense</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -547,10 +547,21 @@ ETA ≤125、到达差 [-60,+10]、对手在途 taskScore &lt;30 时，帧价切
 +164.8→+200.2，未交付 8→4），farmer/镜像逐位无损，定 camper/rusher 各付 -10/-17 保险费零败局；
 selftest 213 项全绿。观察清单：seed 4/23 深链死局（纯节奏救不动）、混合"边农边抢关"形态会漏行为门、
 锚点漂移度量老债</td></tr>
+<tr><td><b>3.22 toll-defense</b></td><td><b>对第一名 2839 复盘（0:3 全未交付）驱动的修复轮：①TollerBot 陪练——
+边冲边农 + 汇入点自适应回手卡（掐踏边狙击不限咽喉）+ RUSH 起点二卡，进六形态回归矩阵；②普通节点驻扎防
+掐踏边（驻扎分支扩展到全节点类型 + 45 帧有界等待预算；收敛分支保持只防咽喉）；③弹尽等风化到可拆——风化
+时刻表公开可算（completeRound + 首风化 45/30 + 每 30 帧 -1），等待 &lt; 强通税就等（真实 S13 案例差 3 帧白付
+36 帧税）；④临别卡三连回归钉子（卡主离场拆卡/过客宽限/坐地户强通——复核确认 V3.19 语义已正确，实战输在
+旧构建）</b></td>
+<td><b>三条证伪</b>：坐地户"闲置驻留"口径（给 CamperBot delay 变体多送 5 帧宽限与动身帧共振，camper seed0/5
+拖死）；RUSH 期削弱解禁（服务端违规 SQUAD_NOT_ALLOWED，WAIT 死循环，selftest 当场抓获）；悬崖推进判据
+（农夫走向下个任务点被判赶路者，镜像/farmer/toller 三形态齐跌）。战绩：vs toller 冻结帧 60~120→0、48/48
+(+32.1)；其余五形态与 V3.21 逐位。selftest 220 项。观察清单：toller margin 仅 +32（真 2839 更强）、悬崖对
+边农边抢关失效、KEY_PASS 卡上限 7/休整鲜度回升未建模</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.21-race-cliff ·
-自测 <code>python3 selftest.py</code>（213 项）· 回归 <code>python3 regress.py</code>（五形态）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.22-toll-defense ·
+自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 
 <script>

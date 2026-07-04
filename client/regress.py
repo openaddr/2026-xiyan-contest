@@ -14,7 +14,8 @@ from multiprocessing import Pool
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arena import run_match, PID_A, PID_B          # noqa: E402
-from sparring import CamperBot, RusherBot, FarmerBot   # noqa: E402
+from sparring import (CamperBot, RusherBot, FarmerBot,   # noqa: E402
+                      TollerBot)
 
 
 class FixedCamper(CamperBot):
@@ -31,7 +32,8 @@ def game(spec):
                 + (not r[PID_B]["delivered"]),
                 "prof": (r[PID_A]["oppProfile"], r[PID_B]["oppProfile"])}
     bot = {"camper": CamperBot, "camper_fixed": FixedCamper,
-           "rusher": RusherBot, "farmer": FarmerBot}[kind]
+           "rusher": RusherBot, "farmer": FarmerBot,
+           "toller": TollerBot}[kind]
     if seat == "A":
         r = run_match(seed, cls_b=bot)
         us, them = PID_A, PID_B
@@ -46,13 +48,15 @@ def game(spec):
 
 def main():
     specs = ([("mirror", s, None) for s in range(12)]
-             + [(k, s, seat) for k in ("camper", "camper_fixed", "farmer")
+             + [(k, s, seat)
+                for k in ("camper", "camper_fixed", "farmer", "toller")
                 for s in range(24) for seat in ("A", "B")]
              + [("rusher", s, seat) for s in range(12)
                 for seat in ("A", "B")])
     with Pool(10) as p:
         rows = p.map(game, specs)
-    for kind in ("mirror", "camper_fixed", "camper", "farmer", "rusher"):
+    for kind in ("mirror", "camper_fixed", "camper", "farmer", "toller",
+                 "rusher"):
         rs = [r for r in rows if r["kind"] == kind]
         n = len(rs)
         w = sum(r["win"] for r in rs)

@@ -335,4 +335,134 @@ class FarmerBot(ScriptedBot):
         return P.a_wait()
 
 
-BOTS = {"camper": CamperBot, "rusher": RusherBot, "farmer": FarmerBot}
+class TollerBot(ScriptedBot):
+    """第一名 2839 (lychee-py) 形态复刻（语料：vs2839-firstplace-2026-07-03.md）。
+
+    边冲边农 + 汇入点自适应回手卡 + RUSH 起点免费二卡：
+    - 官道直冲，途经节点顺路做任务（农不停步，实测它 r181 离 S07 时 90 分）；
+    - 走廊节点（S09/S10/S11）上，若对手尚未过此点且正在逼近/已踏上来边，
+      离开时回手一张满防卡（不限咽喉——S09 普通驿站掐踏边是它的招牌）；
+    - r448+ 在 S13 宫前驿落第二张免费卡；
+    - 直奔交付（它四局 r497±1 交付 ~743）。
+    确定性复刻用于修复对照；RANDOMIZE 抖动起卡阈值/农任务上限做泛化测试。
+    """
+
+    GUARD_NODES = ("S09", "S10", "S11")
+    GUARD_OPP_ETA = 150        # 对手到本节点 ETA 在此内才值得回手卡
+    SECOND_GUARD_NODE = "S13"
+    SECOND_GUARD_ROUND = 448
+    TASK_CAP = 150
+    RANDOMIZE = True
+
+    def _setup(self, state):
+        if getattr(self, "_cfg_done", False):
+            return
+        self._cfg_done = True
+        self._guards_used = 0
+        if not self.RANDOMIZE:
+            return
+        rng = random.Random(f"{state.match_id}:tollerbot")
+        self.GUARD_OPP_ETA = rng.choice((110, 150, 150, 190))
+        self.TASK_CAP = rng.choice((120, 150, 150, 180))
+        self.SECOND_GUARD_ROUND = rng.randrange(440, 461)
+
+    def _opp_eta_to(self, state, node_id):
+        opp = state.opp
+        if not opp:
+            return float("inf")
+        pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if not pos:
+            return float("inf")
+        eta, path = state.graph.shortest_path(pos, node_id, P.BASE_SPEED)
+        return eta if path else float("inf")
+
+    def _rear_guard_here(self, state, cur):
+        """离开走廊节点前的回手卡判断（含掐踏边狙击）。"""
+        me, opp = state.me, state.opp
+        if cur not in self.GUARD_NODES or self._guards_used >= 2:
+            return None
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        node = state.node(cur)
+        g = node.get("guard")
+        if g and g.get("ownerTeamId"):
+            return None
+        if me.get("goodFruit", 0) < 5:
+            return None
+        # 对手已过此点（在我们身后的意义上）就不用卡：看它到宫门的路
+        # 是否还要经过这里
+        opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if not opp_pos:
+            return None
+        _, p_gate = state.graph.shortest_path(opp_pos, state.gate_node,
+                                              P.BASE_SPEED)
+        if cur not in p_gate:
+            return None
+        # 掐踏边：对手已踏上通往这里的边 → 立即落卡（读条 4 帧 < 边剩余）
+        snipe = (opp.get("currentNodeId") is None
+                 and opp.get("nextNodeId") == cur)
+        if snipe or self._opp_eta_to(state, cur) <= self.GUARD_OPP_ETA:
+            self._guards_used += 1
+            return P.a_set_guard(cur, 2)
+        return None
+
+    def bot_action(self, state):
+        self._setup(state)
+        me = state.me
+        if me.get("routeEdgeId"):
+            return None
+        cur = me.get("currentNodeId")
+
+        if me.get("verified"):
+            step = self._walk_to(state, state.terminal_node)
+            if step:
+                return step
+            if cur == state.terminal_node:
+                return P.a_deliver()
+            return P.a_wait()
+
+        # 鲜度维护（它四局交付鲜度 82 上下）
+        res = me.get("resources") or {}
+        if me.get("freshness", 100) < 88 and res.get(P.ICE_BOX, 0) > 0:
+            return P.a_use_resource(P.ICE_BOX)
+
+        # RUSH 起点的 S13 二卡
+        if cur == self.SECOND_GUARD_NODE \
+                and state.round >= self.SECOND_GUARD_ROUND \
+                and self._guards_used < 2 \
+                and me.get("goodFruit", 0) >= 3:
+            node = state.node(cur)
+            g = node.get("guard")
+            if not (g and g.get("ownerTeamId")):
+                self._guards_used += 1
+                return P.a_set_guard(cur, 2)
+
+        # 走廊节点回手卡（含掐踏边）
+        guard = self._rear_guard_here(state, cur)
+        if guard:
+            return guard
+
+        # 边冲边农：脚下有任务就做（不专程绕路——农不停步的核心）
+        if (me.get("taskScore", 0) or 0) < self.TASK_CAP:
+            has_horse = any(res.get(h, 0) > 0
+                            for h in (P.FAST_HORSE, P.SHORT_HORSE))
+            for t in state.claimable_tasks():
+                if t.get("nodeId") != cur:
+                    continue
+                tpl = t.get("taskTemplateId")
+                if tpl == "T04" or (tpl == "T06" and not has_horse):
+                    continue
+                return P.a_claim_task(t["taskId"])
+        claim = self._claim_here(state, (P.ICE_BOX,))
+        if claim:
+            return claim
+
+        if cur == state.gate_node:
+            if state.phase == P.PHASE_RUSH:
+                return P.a_verify_gate()
+            return P.a_wait()
+        return self._walk_to(state, state.gate_node) or P.a_wait()
+
+
+BOTS = {"camper": CamperBot, "rusher": RusherBot, "farmer": FarmerBot,
+        "toller": TollerBot}
