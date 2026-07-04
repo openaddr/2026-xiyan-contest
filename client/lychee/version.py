@@ -8,4 +8,6 @@
 # 3.13 = 3.12-choke-discipline（体检修复）+ 3.12-latent-mechanics（零引用机制）合流
 # 3.18 = 强通语义修正 + 竞速模式 + 陷阱租买止损 + 目标粘性 + 出牌画像
 # 3.19 = 竞技场陪练校准：CAMPER_GRACE 8→5 + 坐地户免宽限
-BUILD_VERSION = "3.19-camper-tuned"
+# 3.20 = 对手画像分类器 + 潼关回退定价 + 无弹药豁免 + 随机化陪练
+#        （prior 分档在随机化种群上被证伪，未上线——见 opp-profile 文档）
+BUILD_VERSION = "3.20-profile-tollgate"

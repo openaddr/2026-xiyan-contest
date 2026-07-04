@@ -13,6 +13,8 @@
 陪练是脚本不是 AI：行为确定、可预测，用于回归和参数绑定测试，
 不追求强度。出牌一律弃权（2614 实测风格）。
 """
+import random
+
 from lychee import protocol as P
 from lychee.strategy import BaselineStrategy
 
@@ -90,14 +92,38 @@ class ScriptedBot(BaselineStrategy):
 
 
 class CamperBot(ScriptedBot):
-    """走廊控制流：抢武关 → 设卡 → 蹲点农任务 → 补卡 → 尾段交付。"""
+    """走廊控制流：抢武关 → 设卡 → 蹲点农任务 → 补卡 → 尾段交付。
+
+    V3.20 起按 match_id 种子抖动关键参数（RANDOMIZE=False 恢复确定性）：
+    确定性脚本只有 ~3 条轨迹类，参数扫描里大量反蹲点参数因此不绑定。
+    抖动维度对应语料里的真实分布：蹲点位（2614 蹲武关、2839 蹲潼关）、
+    离开帧（实测 r340~460）、起卡延迟（"到点即起卡" vs "先农一会儿再
+    起卡"的坐地户——后者是对手画像分类器的收益窗口）。
+    """
 
     CAMP_NODE = "S10"
     SECOND_GUARD = "S11"
     LEAVE_ROUND = 400          # 尾段动身（2614 实测 r340~460 间离开）
     TASK_CAP = 180
+    GUARD_DELAY = 0            # 到达蹲点后先闲置/农任务 N 帧再起第一张卡
+    RANDOMIZE = True           # 按 match_id 派生种子，按种子可复现
+
+    def _setup(self, state):
+        if getattr(self, "_cfg_done", False):
+            return
+        self._cfg_done = True
+        self._arrived = None   # 到达蹲点的帧（GUARD_DELAY 计时起点）
+        if not self.RANDOMIZE:
+            return
+        rng = random.Random(f"{state.match_id}:camperbot")
+        self.CAMP_NODE, self.SECOND_GUARD = rng.choice(
+            (("S10", "S11"), ("S10", "S11"), ("S11", "S10")))
+        self.LEAVE_ROUND = rng.randrange(340, 461)
+        self.TASK_CAP = rng.randrange(150, 201)
+        self.GUARD_DELAY = rng.choice((0, 0, 25, 60, 120))
 
     def bot_action(self, state):
+        self._setup(state)
         me = state.me
         if me.get("routeEdgeId"):
             return None                 # 边上让系统推进（WAIT 会暂停移动）
@@ -124,14 +150,21 @@ class CamperBot(ScriptedBot):
             return self._walk_to(state, camp) or P.a_wait()
 
         if not leaving and cur == camp:
-            # 1) 卡没了/防守清零 → 原地补卡（蹲点补卡循环）
+            if self._arrived is None:
+                self._arrived = rnd
+            # 1) 卡没了/防守清零 → 原地补卡（蹲点补卡循环）。
+            #    首卡受 GUARD_DELAY 抖动（坐地户形态）；补卡不受
+            guard_ready = (rnd - self._arrived >= self.GUARD_DELAY
+                           or getattr(self, "_guard_placed", False))
             node = state.node(camp)
             g = node.get("guard")
             active = bool(g and g.get("ownerTeamId") == state.my_team
                           and g.get("active", g.get("defense", 0) > 0))
-            if not active and not (g and g.get("ownerTeamId")
-                                   and g.get("ownerTeamId") != state.my_team) \
+            if guard_ready and not active \
+                    and not (g and g.get("ownerTeamId")
+                             and g.get("ownerTeamId") != state.my_team) \
                     and me.get("goodFruit", 0) >= 4:
+                self._guard_placed = True
                 return P.a_set_guard(camp, 2)
             # 2) 农任务：脚下有活跃任务就做
             for t in state.claimable_tasks():

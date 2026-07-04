@@ -260,6 +260,8 @@ class PlannerStrategy(BaselineStrategy):
         self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
         self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
         self._reinforce_sent = {}        # nodeId -> 小分队增援派出帧（防重试风暴）
+        self._opp_profile = "unknown"    # 对手画像（V3.20）：unknown/camper，粘性
+        self._prof_idle_choke = 0        # 对手在 KEY_PASS 闲置驻扎的累计帧数
 
     # ---------- 每帧入口 ----------
 
@@ -325,6 +327,13 @@ class PlannerStrategy(BaselineStrategy):
         else:
             self._opp_stationary = (None, state.round)
 
+        # 对手画像（V3.20）：早期识别蹲点型，漏斗先验不等首卡提前升 1.0
+        if self.PROFILE_ENABLED and self._opp_profile == "unknown" \
+                and state.round <= self.PROFILE_WINDOW:
+            self._profile_tick(state)
+        self.planner.opp_profile = \
+            self._opp_profile if self.PROFILE_ENABLED else "unknown"
+
         # 首见帧在吸收时全量记录（V3.18）：曾只在 _breakthrough 里 setdefault，
         # 走到卡前才起算宽限——存在已久的老卡（真蹲点）也被当"临别新卡"
         # 白等 8 帧。吸收时记录后，宽限只留给真正刚立的卡
@@ -380,6 +389,47 @@ class PlannerStrategy(BaselineStrategy):
                     if self.log:
                         self.log.info("blacklist task %s until r%d (%s)",
                                       tid, state.round + 40, code)
+
+    # ---------- 对手画像（V3.20） ----------
+    # 蹲点型的行为签名：在关隘型节点（KEY_PASS/PASS）上"闲着"——不在处理、不在
+    # 被我们的卡挡着，就是站着（等资源起卡/农任务间隙/纯蹲）。镜像对手
+    # 不会这么做：它路过关隘要么在走、要么在做任务（有 currentProcess）、
+    # 要么在我们的卡前等风化（有我方邻卡）。这三类全部排除后按帧累计，
+    # 达阈值即分类 camper（粘性，不回退）。
+    # 价值：真 2614 式"先农一会儿再起卡"的坐地户，在它第一张卡落地前
+    # 就把 FUNNEL_GUARD_PRIOR 提前升到 1.0——这正是 camper 局扫描里
+    # prior 0.91 变体 +13 分/-2 死局的收益窗口（首卡后 _guard_seen 已覆盖）。
+    PROFILE_ENABLED = True
+    PROFILE_CAMP_IDLE = 15     # 关隘闲置累计帧阈值（过客路过≤4 帧，读条 4 帧）
+    PROFILE_WINDOW = 400       # 分类窗口。走廊长边 30~60 帧，蹲点者到达武关
+                               # 本身就要 ~250 帧（竞技场实测），窗口太小会在
+                               # 它刚落座时关死采集。误报风险有界：首卡之后
+                               # prior 已被 _guard_seen 定死，画像不再增量起效；
+                               # 400 之后的关隘等待多为尾段战术对峙，不采
+
+    def _profile_tick(self, state):
+        opp = state.opp
+        node_id, _ = self._opp_stationary
+        if not opp or not node_id:
+            return
+        # 关隘型节点：KEY_PASS（S10 武关）+ PASS（S03/S11）——蹲潼关与
+        # 蹲武关是同一威胁形态（replay36 死局的 ~225 帧通行费来自双关卡）
+        if state.node(node_id).get("nodeType") not in ("KEY_PASS", "PASS"):
+            return
+        if opp.get("currentProcess"):
+            return          # 农任务/读条中不算闲置（镜像在关隘做任务不误伤）
+        # 该点或邻点有我方有效卡 → 它是被卡住在等风化，不是蹲点
+        for nid in [node_id] + [n for n, _ in state.graph.neighbors(node_id)]:
+            g = state.node(nid).get("guard")
+            if g and g.get("ownerTeamId") == state.my_team \
+                    and g.get("active", g.get("defense", 0) > 0):
+                return
+        self._prof_idle_choke += 1
+        if self._prof_idle_choke >= self.PROFILE_CAMP_IDLE:
+            self._opp_profile = "camper"
+            if self.log:
+                self.log.info("opp profiled as CAMPER at r%d (idle %d @ %s)",
+                              state.round, self._prof_idle_choke, node_id)
 
     # ---------- 主车队 ----------
 
@@ -915,6 +965,23 @@ class PlannerStrategy(BaselineStrategy):
         return proc.get("targetNodeId") == node_id and \
             (proc.get("action") or proc.get("type")) == "SET_GUARD"
 
+    @staticmethod
+    def _opp_can_guard(state, node_id):
+        """对手此刻能否在 node_id 落一张有效卡（中边冻结威胁的存在性）。
+
+        规则口径：每队同时激活的卡至多 2 张；KEY_PASS/宫门设卡有 1 好果
+        底价（普通节点 d2 免费）。任一条不满足 → 占位无冻结威胁。
+        """
+        opp = state.opp
+        if not opp:
+            return False
+        if sum(1 for nid in state.nodes if state.enemy_guard(nid)) >= 2:
+            return False
+        if state.node(node_id).get("nodeType") == "KEY_PASS" \
+                and (opp.get("goodFruit", 0) or 0) < 1:
+            return False
+        return True
+
     def _mid_edge_trap_risk(self, state, cur, nxt, plan):
         """对手占着/将先我们到达下一跳节点 → 上边有被掐点冻结的风险。
 
@@ -960,6 +1027,16 @@ class PlannerStrategy(BaselineStrategy):
             risk = opp_eta + self.TRAP_GUARD_FRAMES < our_eta
 
         if not risk:
+            return give_up()
+        # 无弹药豁免（V3.20）：中边冻结的前提是对手真能落卡——设卡每队
+        # 同时至多 2 张，KEY_PASS 还要 1 好果底价。配额用满/掏不出底价时
+        # 占位只是身位，没有冻结威胁，直接过边。与短边豁免同级：规则数学
+        # 可证的确定性豁免，不是概率赌。
+        # （注：曾试过"余量烧穿即赌边"的无条件抢救线——竞技场证伪：对能
+        # 起卡的对手，读条 4 帧掐 56 帧长边十掐九中，3 个等待可活的局
+        # [seed5/17/22] 被送进 135 帧冻结；且 slack 口径不含库存马匹，
+        # 触发点早 ~55 帧。等待→它起卡→节点上强通，仍是唯一有界解）
+        if not self._opp_can_guard(state, nxt):
             return give_up()
         # V3.15 删对峙上限硬闯（闸门过期复盘）：V3.5 的 30 帧上限防的是
         # "对手赖着不走白耗我们"，但两类风险场景它都给错答案——

@@ -175,7 +175,13 @@ class TaskPlanner:
         self.FUNNEL_GUARD_PRIOR = FUNNEL_GUARD_PRIOR
         self.OFFPATH_RACE_FLOOR = OFFPATH_RACE_FLOOR
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
+        self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
+        # 对手画像（V3.20，strategy 每帧写入）："camper" 时漏斗先验提前升 1.0
+        # ——不必等它第一张卡落地。立项依据：camper 局扫描里 RACE_FRAME_MULT/
+        # SWITCH_MARGIN/FUNNEL_GUARD_PRIOR 三参数拨动同一个漏斗前分叉，最优
+        # 方向与镜像局相反 → 参数无全局最优，须按对手风格分档
+        self.opp_profile = "unknown"
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
         self._guard_seen = False       # 对手本局设过卡（漏斗先验升为 1.0，粘性）
@@ -286,13 +292,24 @@ class TaskPlanner:
                         break
             _, path = state.graph.shortest_path(cur, state.gate_node, 1000,
                                                 penalty, ecost)
-            choke = next((n for n in (path or [])[1:]
+            ahead = (path or [])[1:]
+            choke = next((n for n in ahead
                           if state.node(n).get("nodeType") == "KEY_PASS"), None)
+            if choke is None and self.CHOKE_PASS_FALLBACK:
+                # 潼关回退（V3.20）：前方没有 KEY_PASS 时，PASS 型关隘是下一个
+                # 可蹲守的咽喉——过武关不等于出走廊。语料 2839 蹲潼关；随机化
+                # 陪练 seed4（蹲 S11、延迟起卡）双座位 -497 未交付，蹲潼关对
+                # 只认 KEY_PASS 的旧模型完全隐形。开局 S03 被前方的 S10 遮蔽，
+                # 此回退只在过了武关后生效，不改开局行为
+                choke = next((n for n in ahead
+                              if state.node(n).get("nodeType") == "PASS"), None)
             if choke:
                 oe = self._opp_eta(state, choke)
                 if oe != math.inf:
                     t_o = state.round + oe
-                    prior = 1.0 if self._guard_seen else self.FUNNEL_GUARD_PRIOR
+                    prior = (1.0 if (self._guard_seen
+                                     or self.opp_profile == "camper")
+                             else self.FUNNEL_GUARD_PRIOR)
                     toll_direct = self._funnel_toll(
                         state, choke, t_o, path, state.round)
                     ctx = (choke, t_o, prior, toll_direct)
@@ -337,10 +354,15 @@ class TaskPlanner:
                 # 到达估计噪声（±2 帧的出发差被斜坡放大成 ±5 帧期望费）
                 dead = max(0.0, guard_up - t) if p_lose >= 1.0 else 0.0
                 age = max(0.0, t + dead - guard_up)
-                if age < FUNNEL_FIRST_WEATHER:
+                # 非 KEY_PASS 卡（潼关类 PASS 关隘）首次风化 30 帧（规则：
+                # 满防 45 帧仅限 KEY_PASS，其余 30），衰减节奏相同
+                first = (FUNNEL_FIRST_WEATHER
+                         if state.node(choke).get("nodeType") == "KEY_PASS"
+                         else FUNNEL_WEATHER_GAP)
+                if age < first:
                     defense = 6
                 else:
-                    defense = max(0, 5 - int((age - FUNNEL_FIRST_WEATHER)
+                    defense = max(0, 5 - int((age - first)
                                              // FUNNEL_WEATHER_GAP))
                 if defense <= 0:
                     return dead, 0.0

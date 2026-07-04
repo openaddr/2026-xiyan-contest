@@ -1413,7 +1413,10 @@ class Arena:
                         "good": t.deliver_good if t.delivered else t.good,
                         "fresh": round(t.deliver_fresh if t.delivered
                                        else t.fresh, 1),
-                        "metrics": self.metrics[pid]}
+                        "metrics": self.metrics[pid],
+                        # 该侧策略对对手的画像结论（V3.20，脚本 bot 无此属性）
+                        "oppProfile": getattr(self.strategies[pid],
+                                              "_opp_profile", None)}
         sa, sb = out[PID_A]["score"], out[PID_B]["score"]
         out["winner"] = PID_A if sa > sb else PID_B if sb > sa else 0
         out["margin"] = sa - sb

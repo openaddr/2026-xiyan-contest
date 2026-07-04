@@ -2362,6 +2362,27 @@ def test_trap_ransom():
     ok &= check("租买: 真漏斗口绕不开照旧等待",
                 last and last["action"] == "WAIT", str(last))
 
+    # 2b) 无弹药豁免（V3.20）：对手两张卡配额已满 → 占位无冻结威胁，直接过
+    #     （task_score=130 关掉 S09 的蹲刷分支，隔离被测逻辑，同用例 3）
+    gs = gs_camp("S09", "S10", task_score=130)
+    for nid in ("S05", "S07"):   # 对手的两张激活卡在别处
+        gs.nodes[nid]["guard"] = {"ownerTeamId": "BLUE", "defense": 3,
+                                  "maxDefense": 7, "active": True}
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("租买: 对手卡配额用满则占位无威胁直接过",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
+
+    # 2c) 无弹药豁免之二：KEY_PASS 底价 1 好果掏不出 → 同样直接过
+    gs = gs_camp("S09", "S10", task_score=130)
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["goodFruit"] = 0
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("租买: 对手掏不出关隘底价好果直接过",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S10",
+                str(a))
+
     # 3) 短边豁免：S13→S14 (E09) 改成 3 帧短边（设卡读条 4 帧），对手蹲在
     #    宫门也来不及成卡 → 直接过，规则数学可证（task_score 130 关掉 S13
     #    候选点的蹲刷分支，隔离被测逻辑）
@@ -2436,6 +2457,94 @@ def test_card_profile():
     return ok
 
 
+def test_opp_profile():
+    """V3.20 对手画像：关隘闲置驻扎累计达阈值 → 蹲点型 → 漏斗先验免首卡升 1.0。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def prof_state(round_no, opp_node="S10", opp_proc=None, my_guard=None):
+        """我在 S02 早期位置；对手 IDLE 停靠 opp_node；全图无卡无障碍。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S02", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         goodFruit=8, badFruit=2, freshness=98.0,
+                         resources={}, taskScore=0)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_node, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=opp_proc,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            if my_guard and n["nodeId"] == my_guard:
+                n["guard"] = {"ownerTeamId": "RED", "defense": 4,
+                              "maxDefense": 7, "active": True}
+        gs.on_inquire(d)
+        return gs
+
+    def feed(st, frames=None, **kw):
+        n = frames if frames is not None else st.PROFILE_CAMP_IDLE + 3
+        for i in range(n):
+            st.decide(prof_state(40 + i, **kw))
+        return st
+
+    # 1) 正例：对手在武关（KEY_PASS）无事闲站 ≥阈值帧 → 蹲点型
+    st = feed(PlannerStrategy())
+    ok &= check("画像: 关隘闲置驻扎达阈值分类蹲点型",
+                st._opp_profile == "camper", st._opp_profile)
+
+    # 1b) 效果：分类后漏斗先验免首卡升 1.0（_guard_seen 仍为 False）
+    ctx = st.planner._funnel_ctx(prof_state(60), "S02")
+    ok &= check("画像: 蹲点型漏斗先验免首卡升 1.0",
+                not st.planner._guard_seen and ctx and ctx[2] == 1.0, str(ctx))
+
+    # 1c) 蹲潼关（PASS 型关隘）同样识别——replay36 死局的通行费来自双关卡
+    st = feed(PlannerStrategy(), opp_node="S11")
+    ok &= check("画像: 蹲 PASS 型关隘同样识别",
+                st._opp_profile == "camper", st._opp_profile)
+
+    # 2) 反例：对手在关隘做任务（currentProcess 非空）不算闲置——镜像不误伤
+    st = feed(PlannerStrategy(), frames=30,
+              opp_proc={"action": "CLAIM_TASK", "taskId": "T_X",
+                        "remainRound": 10})
+    ok &= check("画像: 关隘做任务不算蹲点",
+                st._opp_profile == "unknown", st._opp_profile)
+
+    # 3) 反例：对手停在我方卡的邻节点（S10 邻 S11 有我卡）是在等风化，
+    #    不是蹲点——镜像局对峙不误伤
+    st = feed(PlannerStrategy(), frames=30, my_guard="S11")
+    ok &= check("画像: 我方卡前等待不算蹲点",
+                st._opp_profile == "unknown", st._opp_profile)
+
+    # 4) 反例：分类窗口外（>PROFILE_WINDOW）不再分类——晚期关隘等待多为
+    #    战术性，且先验早被首卡定死
+    st = PlannerStrategy()
+    for i in range(30):
+        st.decide(prof_state(st.PROFILE_WINDOW + 10 + i))
+    ok &= check("画像: 窗口外不分类",
+                st._opp_profile == "unknown", st._opp_profile)
+
+    # 5) 开关（A/B 用）：关掉后 planner 只见 unknown，先验回落默认
+    st = PlannerStrategy()
+    st.PROFILE_ENABLED = False
+    feed(st)
+    ctx = st.planner._funnel_ctx(prof_state(60), "S02")
+    ok &= check("画像: 开关关闭时先验回落默认",
+                st.planner.opp_profile == "unknown"
+                and ctx and ctx[2] == st.planner.FUNNEL_GUARD_PRIOR, str(ctx))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -2465,6 +2574,7 @@ def main():
     ok &= test_target_stickiness()
     ok &= test_trap_ransom()
     ok &= test_card_profile()
+    ok &= test_opp_profile()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
