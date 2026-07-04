@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.26-farm-meta)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.27-road-tax)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.26-farm-meta</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.27-road-tax</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -574,9 +574,15 @@ selftest 213 项全绿。观察清单：seed 4/23 深链死局（纯节奏救不
 <td>selftest 235 项（新增 11：vs2619/vs2986 复刻正例 + 三控制组）。遗留：山线 vs 官道刷新密度未入账
 （r99 型开局岔路仍可能进山，需任务流期望建模）；悬崖对边农边抢关混合体依旧失效（V3.22 证伪记录有效）。
 六形态电池结果见 farm-meta 文档 §四</td></tr>
+<tr><td><b>3.27 road-tax</b></td><td><b>官道税修正（reports 二批：任务分追平 150:150 后仍 -6/-5，纯走廊
+时差）：①阴影×漏斗去重——漏斗模型（V3.16）已按时机精确定价的咽喉不再叠 V3.1 时代的 35 帧阴影罚，同一
+恐惧不收两遍钱（r99 岔路进山的决定性楔子）；②刷新流期望——节点刷新率 =（本局观测 + taskCandidates 静态
+先验）混合 × 驻留/路过窗口信用 × 边际任务分 × 竞争折扣，上限一个任务</b></td>
+<td>刻度诚实注记：本图两走廊原始刷新数几乎打平（山 8 vs 官 7），刷新流的价值在波次驻留决策，扳走廊靠
+去重。selftest 全绿（+5 钉子）+ smoke 全绿 + camper/toller 热种子逐位</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.26-farm-meta ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.27-road-tax ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 

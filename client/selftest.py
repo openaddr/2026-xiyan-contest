@@ -3055,6 +3055,99 @@ def test_farm_meta():
     return ok
 
 
+def test_road_tax():
+    """V3.27 官道税修正：①阴影×漏斗去重 ②刷新流期望。
+
+    reports 新败局（vs2986 -6 / vs2738 -5，任务分已平、纯走廊时差）：
+    r99 岔路把官道冤枉成山线的楔子是武关被"阴影咽喉罚 35 + 漏斗税"
+    双重计税；刷新流让热点波次（S07 型）在估值里可见。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+    from lychee.planner import TaskPlanner
+
+    def gs_road(round_no=100, opp_pos="S07", tasks=None):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"] = []
+        d["tasks"] = tasks or []
+        d["weather"] = {"active": [], "forecast": []}
+        for p_ in d["players"]:
+            if p_["playerId"] == 1001:
+                p_.update(state="IDLE", currentNodeId="S03", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None, buffs=[],
+                          resources={}, freshness=95.0, goodFruit=95,
+                          badFruit=0, taskScore=60)
+            else:
+                p_.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None,
+                          delivered=False, retired=False, taskScore=0)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # ---- ① 阴影×漏斗去重 ----
+    # 对手在 S07（官道，先于我们到 S10）→ S10 同时在阴影集和漏斗 ctx 里。
+    # 去重开：S10 罚 = 时间罚（阴影 35 不叠）；去重关：罚 +35
+    pl = TaskPlanner()
+    gs = gs_road()
+    pl._funnel_ctx(gs, "S03", pl._penalty_fn(gs), pl._edge_cost_fn(gs))
+    assert pl._last_choke == "S10", f"前提: 漏斗咽喉应为 S10, got {pl._last_choke}"
+    assert "S10" in pl._shadow_nodes(gs), "前提: S10 应在阴影集"
+    pen_on = pl._penalty_fn(gs)("S10")
+    pl2 = TaskPlanner()
+    pl2.SHADOW_FUNNEL_DEDUP = False
+    pl2._funnel_ctx(gs, "S03", pl2._penalty_fn(gs), pl2._edge_cost_fn(gs))
+    pen_off = pl2._penalty_fn(gs)("S10")
+    ok &= check("官道税: 漏斗咽喉不叠阴影罚（去重 35）",
+                pen_off - pen_on == pl.SHADOW_CHOKE_PENALTY,
+                f"on={pen_on} off={pen_off}")
+    # 非漏斗咽喉的阴影罚保持原样（如对手路线上的其他咽喉）
+    other = [n for n in pl._shadow_nodes(gs)
+             if n != "S10" and gs.node(n).get("nodeType") in
+             ("KEY_PASS", "PASS", "MOUNTAIN_PASS")]
+    if other:
+        ok &= check("官道税: 非漏斗咽喉阴影罚不变",
+                    pl._penalty_fn(gs)(other[0])
+                    == pl2._penalty_fn(gs)(other[0]), str(other[0]))
+
+    # ---- ② 刷新流期望 ----
+    def mk_task(tid, node, refresh):
+        return {"taskId": tid, "taskTemplateId": "T01", "nodeId": node,
+                "score": 30, "processRound": 4, "active": True,
+                "completed": False, "ownerId": 0, "expireRound": 600,
+                "protectTeam": 0, "refreshRound": refresh}
+    pl3 = TaskPlanner()
+    # 喂 4 帧观测：S07 三波、S06 一波
+    for rnd, tasks in ((30, [mk_task("T_a", "S07", 30)]),
+                       (60, [mk_task("T_a", "S07", 30), mk_task("T_b", "S06", 60)]),
+                       (100, [mk_task("T_c", "S07", 100)]),
+                       (120, [mk_task("T_d", "S07", 120)])):
+        pl3._observe_spawns(gs_road(round_no=rnd, tasks=tasks))
+    ok &= check("刷新流: 观测计数按节点累计",
+                pl3._spawn_count.get("S07") == 3
+                and pl3._spawn_count.get("S06") == 1,
+                str(pl3._spawn_count))
+    g_late = gs_road(round_no=150)
+    r_hot = pl3._refresh_rate(g_late, "S07")
+    r_cold = pl3._refresh_rate(g_late, "S09")
+    ok &= check("刷新流: 热点率高于冷点", r_hot > r_cold >= 0.0,
+                f"S07={r_hot:.4f} S09={r_cold:.4f}")
+    b = pl3._refresh_bonus(g_late, "S07", ["S09", "S10"], 60)
+    ok &= check("刷新流: 热点目标有正加成且不超上限",
+                0 < b <= pl3.REFRESH_VALUE_CAP, f"bonus={b:.1f}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -3089,6 +3182,7 @@ def main():
     ok &= test_card_profile()
     ok &= test_opp_profile()
     ok &= test_farm_meta()
+    ok &= test_road_tax()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
