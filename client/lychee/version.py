@@ -158,4 +158,20 @@
 # 3.56 = lose6 小步防守：S02->S03 早段被高防卡冻住且无三角位时，
 #        放弃官道入口改走 S04 水路分支；低任务分在 S09 被 S10 身体墙
 #        拖住时，等小预算后走 S08 侧翼承诺，封顶局仍沿旧真漏斗等待。
-BUILD_VERSION = "3.56-side-entry-escape"
+# 3.57 = 多地图变体自测脚手架（client/multimap_selftest.py）：程序化生成
+#        拓扑变体（多入度gate/KEY_PASS换位/删支路/改路线类型/扰动坐标），
+#        断言策略地图无关（5变体全PASS）；并回归 RUSH+gate前驱+对手焙门时
+#        _mid_edge_trap_risk 咽喉无界等待的隐患（XFAIL 追踪，策略行为未改）。
+# 3.58 = 场景B隐患修复：_mid_edge_trap_risk 对【RUSH + nxt==gate】加有界等待
+#        （TRAP_RUSH_GATE_WAIT=25 帧），超限放行抢先过边，不再无界等丢验核先手
+#        （warden 焙门等钩 / demo r432-547 干走 115 帧的复刻）。中段关隘（nxt!=gate）
+#        的 V3.15 咽喉无界等待教义不动。multimap_selftest 对应 XFAIL→XPASS（5变体
+#        前25帧等/第26帧放行）；并修 make_state 让运行时 nodes 带 nodeType（feat
+#        on_inquire 不从 static 继承 nodeType，否则 gate 被误判 ordinary）。
+# 3.59 = 普通节点过度等待修复（replay(3) 根因）：_mid_edge_trap_risk 普通节点分支
+#        加可秒破豁免——我方能一击破该节点满防卡（_break_capacity >= _node_guard_cap）
+#        时放行，不再无脑等 TRAP_ORDINARY_WAIT(45)。对手在普通节点路过/做任务/设弱卡
+#        时，照等 45 帧是白送时间（replay(3) S04+S07 两段共 ~87 帧拖死交付）。
+#        能秒破则设卡即破（节点攻坚1帧/边削几帧）<< 等45帧。弹药不足破不了时仍等
+#        （V3.22 防掐边保留）。selftest 补"能秒破→放行"反例 + "不能秒破→仍等"。
+BUILD_VERSION = "3.59-breakable-ordinary-exemption"

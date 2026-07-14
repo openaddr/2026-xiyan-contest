@@ -279,6 +279,12 @@ class PlannerStrategy(BaselineStrategy):
     # 收敛等待也要有预算，但比 camped 门更谨慎，只作短观察窗。
     TRAP_FARMER_CONVERGE_WAIT = 12
     TRAP_FARMER_CONVERGE_TASK = 90
+    # RUSH 进 gate 有界等待（V3.57，场景B隐患修复）：warden 式"验核后焙门
+    # 等钩"会把无界等待的我们拖在 gate 前驱丢先手（demo r432-547 干走 115 帧
+    # 的复刻，multimap_selftest XFAIL 实证地图无关）。中段咽喉蹲守十掐九中仍
+    # 无界（V3.15 教义不动），仅【RUSH + nxt==gate】给有界预算，超限抢先过边
+    # ——接受边中被冻的小风险换验核先手（终段节奏紧，无界等=确定丢先手）。
+    TRAP_RUSH_GATE_WAIT = 25
     TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
                                 # （无界版被电池证伪 camper 34/48；有界
                                 # 变体的配对对照见 trap-gate 实验脚本）
@@ -2072,8 +2078,25 @@ class PlannerStrategy(BaselineStrategy):
         # 耗尽硬闯。与咽喉的无界等待（V3.15 论断）刻意不同：咽喉蹲守者
         # 十掐九中，普通节点蹲守者大概率只是在等任务波次
         if ordinary:
+            # 可秒破豁免（V3.59）：我方能一击破该普通节点满防卡（攻坚值 >=
+            # _node_guard_cap）→ 对手即使设卡也能立即破（节点攻坚 1 帧 / 边上
+            # 削弱几帧），等 TRAP_ORDINARY_WAIT(45) 无意义。replay(3) 根因：对手
+            # 在普通节点只是路过/做任务，设的也是弱卡，却照等 45 帧×2 段=87 帧
+            # 把交付拖没。弹药不足破不了满防卡时仍走原等待（保留 V3.22 防掐边）。
+            if self.planner._break_capacity(state) >= self._node_guard_cap(state, nxt):
+                return give_up()
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_ORDINARY_WAIT:
+                return give_up()
+        elif (state.phase == P.PHASE_RUSH and nxt == state.gate_node):
+            # RUSH 进 gate 有界等待（V3.57）：超 TRAP_RUSH_GATE_WAIT 帧仍被焙门者
+            # 挡着 → 放行抢先过边，不再无界等。中段关隘（nxt!=gate）不进此分支，
+            # 保持 V3.15 咽喉无界等待教义。
+            _, n_wait = self._trap_wait
+            if self._trap_wait[0] == nxt and n_wait >= self.TRAP_RUSH_GATE_WAIT:
+                if self.log:
+                    self.log.info("rush gate wait capped at %d @%s, forcing edge",
+                                  n_wait, nxt)
                 return give_up()
         elif self._farmer_converge_release(state, nxt, camped, ordinary):
             if self._farmer_converge_no_overlap(state, nxt, our_eta):

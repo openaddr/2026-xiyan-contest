@@ -1610,9 +1610,20 @@ def test_trap_proof():
     for n in gs.nodes.values():
         if n["nodeId"] == "S11":
             n["nodeType"] = "STATION"
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["goodFruit"], p["badFruit"] = 7, 0   # V3.59：_break_capacity=4 < cap 6，不能秒破
     a = PlannerStrategy().main_action(gs)
-    ok &= check("防陷阱: 普通驿站同样设防(V3.22)",
+    ok &= check("防陷阱: 普通节点弹药不足秒破不了仍等(V3.22保留)",
                 a and a["action"] == "WAIT", str(a))
+    # 反例（V3.59）：弹药足能秒破满防卡 → 放行不等（replay(3) 三段普通节点等待回归）
+    gs2 = gs_tail()
+    for n in gs2.nodes.values():
+        if n["nodeId"] == "S11":
+            n["nodeType"] = "STATION"
+    a2 = PlannerStrategy().main_action(gs2)   # 默认 goodFruit=90 badFruit=2 能秒破
+    ok &= check("防陷阱: 普通节点能秒破则放行(V3.59)",
+                a2 and a2["action"] == "MOVE" and a2["targetNodeId"] == "S11", str(a2))
 
     # 1) 对手正站在我们的下一跳（咽喉 S11）→ 不上边，等待
     a = PlannerStrategy().main_action(gs_tail())
@@ -1631,8 +1642,11 @@ def test_trap_proof():
     for n in gs.nodes.values():
         if n["nodeId"] == "S11":
             n["nodeType"] = "STATION"
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["goodFruit"], p["badFruit"] = 7, 0   # V3.59：不能秒破时短等仍生效
     a = PlannerStrategy().main_action(gs)
-    ok &= check("防陷阱: 普通长边收敛也短等让过客先离站",
+    ok &= check("防陷阱: 普通长边收敛弹药不足时短等让过客先离站",
                 a and a["action"] == "WAIT", str(a))
 
     # 2c) 死线逃逸：咽喉已经等穿余量时，继续等=确定未交付，允许赌边。
